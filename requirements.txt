@@ -2,6 +2,7 @@ flask>=2.3
 pandas>=2.0
 openpyxl>=3.1
 werkzeug>=2.3
+gunicorn>=21.2
 xlrd>=2.0
 # PDF extraction (cascata + fallback) — opcionais
 pdfplumber>=0.11

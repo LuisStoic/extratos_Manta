@@ -1,0 +1,93 @@
+{
+  "unidades": [
+    {
+      "id": "GN",
+      "marca": "GN",
+      "desc_unidade": "GN CSC"
+    },
+    {
+      "id": "LD1",
+      "marca": "Ludika",
+      "desc_unidade": "Ludika Asa-Sul"
+    },
+    {
+      "id": "LD2",
+      "marca": "Ludika",
+      "desc_unidade": "Ludika [Outra]"
+    },
+    {
+      "id": "MN303",
+      "marca": "Manta",
+      "desc_unidade": "Manta 303"
+    },
+    {
+      "id": "MN610",
+      "marca": "Manta",
+      "desc_unidade": "Manta 610"
+    },
+    {
+      "id": "MN702",
+      "marca": "Manta",
+      "desc_unidade": "Manta 702"
+    },
+    {
+      "id": "MN712",
+      "marca": "Manta",
+      "desc_unidade": "Manta 712"
+    },
+    {
+      "id": "MNJB",
+      "marca": "Manta",
+      "desc_unidade": "Manta JB"
+    },
+    {
+      "id": "MNVP",
+      "marca": "Manta",
+      "desc_unidade": "Manta VP"
+    },
+    {
+      "id": "RC608",
+      "marca": "RaiaClube",
+      "desc_unidade": "RaiaClube 608"
+    },
+    {
+      "id": "RCA",
+      "marca": "RaiaClube",
+      "desc_unidade": "RaiaClube ASTCU"
+    }
+  ],
+  "depara": {
+    "Tipo": "Tipo",
+    "Valor": "Valor",
+    "Data": "Data",
+    "Origem": "Banco",
+    "Descrição": "Descricao"
+  },
+  "fn_patterns": {
+    "AQUAFAN_BRB_01-26": "MN610",
+    "AQUAFAN_BRB_02-26": "MN610",
+    "AQUAFAN_BRB_11-25": "MN610",
+    "AQUAFAN_BRB_12-25": "MN610",
+    "FILIAL__JBMANTA-NATACAO-E": "MNJB",
+    "FILIALJB_MANTA-NATACAO-E-": "MNJB",
+    "MANTA-NATACAO-E-FORMACAO-": "MNJB",
+    "VP_MANTA_01012024_A_31122": "MNVP",
+    "VP_MANTA_01012025_A_30102": "MNVP",
+    "RAIA-CLUB-608S_01012024_A": "MNVP",
+    "RAIA-CLUB-608S_01012025_A": "MNVP",
+    "RAIA-CLUB-608S_01112025_A": "RC608",
+    "RC_608_RC_-_2024_COMPROVA": "RC608",
+    "RC_608_RC_-_2025_COMPROVA": "RC608",
+    "RC_608_RC608_COMPROVANTE_": "RC608",
+    "RC_608__COMPROVANTE_DE_EX": "RC608",
+    "TORPEDO_SANTANDER_01-26": "MN610",
+    "TORPEDO_SANTANDER_02-26": "MN610",
+    "TORPEDO_BRB_01-26": "MN610",
+    "TORPEDO_BRB_02-26": "MN610",
+    "TORPEDO_BRB_11-25": "MN610",
+    "TORPEDO_BRB_12-25": "MN610",
+    "EXTRATO_BRB_RAIA_10_NOV.2": "MN610",
+    "FILIAL_-_2025_COMPROVANTE": "MN303",
+    "FILIAL_2024_COMPROVANTE_D": "MN303"
+  }
+}

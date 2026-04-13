@@ -1,0 +1,1449 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Validação de Extratos v8.0 — Stoic Capital</title>
+<style>
+*{margin:0;padding:0;box-sizing:border-box}
+body{font-family:'Segoe UI',Arial,sans-serif;background:#F2F4F8;color:#1a1a2e;font-size:14px}
+:root{--navy:#0D1838;--gold:#DCC697;--gold-dark:#B8A070;--red:#E53E3E;--green:#27AE60;--amber:#F5A623;--blue:#2563EB;--surface:#fff;--border:#DDE1EA;--muted:#6B7280;--bg:#F2F4F8}
+
+/* Header */
+.header{background:var(--navy);color:#fff;padding:14px 28px;display:flex;justify-content:space-between;align-items:center;box-shadow:0 2px 8px rgba(0,0,0,.2)}
+.header-brand{display:flex;flex-direction:column}
+.header-brand h1{font-size:17px;font-weight:600;letter-spacing:.02em}
+.header-brand p{font-size:11px;opacity:.6;margin-top:2px}
+.header-actions{display:flex;gap:8px;align-items:center}
+.btn-header{background:var(--gold);color:var(--navy);border:none;padding:7px 14px;border-radius:4px;font-size:12px;font-weight:600;cursor:pointer}
+.btn-header:hover{background:var(--gold-dark)}
+.btn-header-ghost{background:transparent;color:rgba(255,255,255,.7);border:1px solid rgba(255,255,255,.25);padding:7px 14px;border-radius:4px;font-size:12px;cursor:pointer}
+.btn-header-ghost:hover{background:rgba(255,255,255,.08)}
+
+/* Stepper */
+.stepper{background:var(--surface);border-bottom:1px solid var(--border);padding:0 28px;display:flex;gap:0}
+.step-btn{padding:14px 20px;border:none;background:transparent;font-size:13px;font-weight:500;color:var(--muted);cursor:pointer;border-bottom:3px solid transparent;display:flex;align-items:center;gap:7px;transition:all .2s;white-space:nowrap}
+.step-btn .step-num{width:20px;height:20px;border-radius:50%;background:var(--border);color:var(--muted);font-size:11px;display:flex;align-items:center;justify-content:center;font-weight:700}
+.step-btn.active{color:var(--navy);border-bottom-color:var(--gold)}
+.step-btn.active .step-num{background:var(--navy);color:#fff}
+.step-btn.done .step-num{background:var(--green);color:#fff}
+.step-btn.done{color:var(--green)}
+.step-btn:disabled{cursor:not-allowed;opacity:.4}
+
+/* Layout */
+.container{max-width:1260px;margin:24px auto;padding:0 24px}
+.card{background:var(--surface);border-radius:6px;border:1px solid var(--border);padding:28px;margin-bottom:20px}
+.tab-content{display:none}
+.tab-content.active{display:block}
+
+/* Alerts */
+.alert{padding:12px 16px;border-radius:4px;font-size:13px;margin-bottom:16px;display:none}
+.alert.show{display:flex;align-items:flex-start;gap:10px}
+.alert-success{background:#D1FAE5;color:#065F46;border-left:4px solid var(--green)}
+.alert-error{background:#FEE2E2;color:#7F1D1D;border-left:4px solid var(--red)}
+.alert-warn{background:#FEF3C7;color:#78350F;border-left:4px solid var(--amber)}
+.alert-info{background:#DBEAFE;color:#1E3A5F;border-left:4px solid var(--blue)}
+
+/* Buttons */
+.btn{padding:9px 18px;border-radius:4px;border:none;font-size:13px;font-weight:600;cursor:pointer;transition:all .15s;display:inline-flex;align-items:center;gap:6px}
+.btn:disabled{opacity:.4;cursor:not-allowed}
+.btn-primary{background:var(--navy);color:#fff}
+.btn-primary:hover:not(:disabled){background:#1a2a50}
+.btn-success{background:var(--green);color:#fff}
+.btn-success:hover:not(:disabled){background:#1e9150}
+.btn-danger{background:var(--red);color:#fff}
+.btn-danger:hover:not(:disabled){background:#c53030}
+.btn-gold{background:var(--gold);color:var(--navy)}
+.btn-gold:hover:not(:disabled){background:var(--gold-dark)}
+.btn-ghost{background:transparent;color:var(--navy);border:1px solid var(--border)}
+.btn-ghost:hover:not(:disabled){background:var(--bg)}
+.btn-sm{padding:5px 10px;font-size:12px}
+
+/* Upload zone */
+.upload-zone{border:2px dashed var(--gold);border-radius:8px;padding:48px;text-align:center;background:#FDFBF6;cursor:pointer;transition:all .2s}
+.upload-zone:hover{background:#F5EFD8;border-color:var(--gold-dark)}
+.upload-zone.dragover{background:#F5EFD8;border-color:var(--navy)}
+.upload-icon{font-size:36px;margin-bottom:12px}
+.upload-zone h3{font-size:15px;color:var(--navy);margin-bottom:6px}
+.upload-zone p{font-size:12px;color:var(--muted)}
+
+/* File list */
+.file-item{display:flex;align-items:center;gap:12px;padding:10px 14px;border:1px solid var(--border);border-radius:4px;background:#FAFAFA;margin-bottom:6px}
+.file-icon{font-size:18px;flex-shrink:0}
+.file-info{flex:1;min-width:0}
+.file-name{font-weight:600;font-size:13px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.file-meta{font-size:11px;color:var(--muted);margin-top:2px}
+.file-preview-badge{font-size:11px;padding:2px 7px;border-radius:3px;margin-left:6px;font-weight:500}
+.badge-ok{background:#D1FAE5;color:#065F46}
+.badge-warn{background:#FEF3C7;color:#78350F}
+.badge-err{background:#FEE2E2;color:#7F1D1D}
+
+/* Tables */
+table{width:100%;border-collapse:collapse}
+th{background:#F0F2F8;font-size:12px;font-weight:600;color:var(--muted);text-transform:uppercase;letter-spacing:.04em;padding:10px 12px;text-align:left;white-space:nowrap}
+td{padding:10px 12px;border-bottom:1px solid var(--border);font-size:13px;vertical-align:middle}
+tr:hover td{background:#FAFBFD}
+.table-wrap{overflow-x:auto;border-radius:4px;border:1px solid var(--border)}
+
+/* Badges */
+.badge{display:inline-flex;align-items:center;gap:4px;padding:3px 8px;border-radius:3px;font-size:11px;font-weight:600;white-space:nowrap}
+.badge-a{background:#D1FAE5;color:#065F46}
+.badge-b{background:#FEE2E2;color:#7F1D1D}
+.badge-verde{background:#D1FAE5;color:#065F46}
+.badge-amarelo{background:#FEF3C7;color:#78350F}
+.badge-vermelho{background:#FEE2E2;color:#7F1D1D}
+.badge-cinza{background:#F3F4F6;color:#374151}
+.badge-alta{background:#D1FAE5;color:#065F46}
+.badge-media{background:#FEF3C7;color:#78350F}
+.badge-baixa{background:#FEE2E2;color:#7F1D1D}
+.badge-entrada{background:#DBEAFE;color:#1E3A5F}
+.badge-saida{background:#FEE2E2;color:#7F1D1D}
+.badge-indef{background:#F3F4F6;color:#374151}
+.badge-confirmado{background:#D1FAE5;color:#065F46}
+.badge-pendente{background:#FEF3C7;color:#78350F}
+.badge-excluido{background:#F3F4F6;color:#374151;text-decoration:line-through}
+
+/* Confidence bar */
+.conf-bar-wrap{width:80px;height:14px;background:#EEF0F5;border-radius:7px;overflow:hidden;display:inline-block}
+.conf-bar-fill{height:100%;display:flex;align-items:center;justify-content:center;font-size:10px;color:#fff;font-weight:700}
+
+/* Stats grid */
+.stats-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(130px,1fr));gap:14px;margin:16px 0}
+.stat-card{background:var(--bg);border:1px solid var(--border);border-radius:5px;padding:14px 16px;text-align:center}
+.stat-label{font-size:11px;color:var(--muted);text-transform:uppercase;letter-spacing:.04em;margin-bottom:6px}
+.stat-value{font-size:26px;font-weight:700;color:var(--navy)}
+.stat-value.green{color:var(--green)}
+.stat-value.red{color:var(--red)}
+.stat-value.amber{color:var(--amber)}
+
+/* Progress */
+.progress-wrap{background:#EEF0F5;border-radius:8px;height:12px;overflow:hidden;margin:10px 0}
+.progress-fill{height:100%;background:linear-gradient(90deg,var(--navy),var(--blue));transition:width .4s;border-radius:8px}
+.progress-label{font-size:12px;color:var(--muted);margin-top:4px;text-align:center}
+
+/* Schema map */
+.schema-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(220px,1fr));gap:8px;margin-top:12px}
+.schema-item{display:flex;justify-content:space-between;align-items:center;padding:8px 12px;border:1px solid var(--border);border-radius:4px;background:#FAFAFA;font-size:12px}
+.schema-original{color:var(--muted);font-family:monospace;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:120px}
+.schema-arrow{color:var(--border);margin:0 6px}
+.schema-anchor{font-weight:600;color:var(--navy)}
+
+/* Section headers */
+.section-header{display:flex;justify-content:space-between;align-items:center;margin-bottom:16px}
+.section-title{font-size:16px;font-weight:700;color:var(--navy)}
+.section-count{font-size:13px;color:var(--muted)}
+
+/* Issues tags */
+.issue-tag{display:inline-block;padding:2px 6px;background:#FEE2E2;color:#7F1D1D;border-radius:3px;font-size:10px;font-weight:500;margin:1px}
+
+/* Pagination */
+.pagination{display:flex;align-items:center;gap:6px;justify-content:center;margin-top:16px}
+.page-btn{padding:5px 10px;border:1px solid var(--border);border-radius:3px;background:#fff;cursor:pointer;font-size:12px}
+.page-btn.active{background:var(--navy);color:#fff;border-color:var(--navy)}
+.page-btn:disabled{opacity:.4;cursor:not-allowed}
+.page-info{font-size:12px;color:var(--muted)}
+
+/* Tab sub-headers (Revisão) */
+.group-tab-nav{display:flex;gap:0;border-bottom:2px solid var(--border);margin-bottom:20px}
+.group-tab-btn{padding:10px 20px;border:none;background:transparent;font-size:13px;font-weight:600;color:var(--muted);cursor:pointer;border-bottom:3px solid transparent;margin-bottom:-2px}
+.group-tab-btn.active{color:var(--navy);border-bottom-color:var(--gold)}
+
+/* Modal */
+.modal-overlay{display:none;position:fixed;inset:0;background:rgba(0,0,0,.5);z-index:1000;align-items:center;justify-content:center}
+.modal-overlay.open{display:flex}
+.modal{background:#fff;border-radius:8px;padding:28px;width:94%;max-width:640px;max-height:90vh;overflow-y:auto;position:relative}
+.modal-header{display:flex;justify-content:space-between;align-items:center;margin-bottom:20px;padding-bottom:14px;border-bottom:1px solid var(--border)}
+.modal-title{font-size:16px;font-weight:700;color:var(--navy)}
+.modal-close{background:none;border:none;font-size:22px;cursor:pointer;color:var(--muted);line-height:1}
+.modal-close:hover{color:var(--navy)}
+.modal-footer{display:flex;gap:8px;justify-content:flex-end;margin-top:20px;padding-top:16px;border-top:1px solid var(--border)}
+
+/* Forms */
+.form-group{margin-bottom:14px}
+.form-label{display:block;font-size:12px;font-weight:600;color:var(--muted);text-transform:uppercase;letter-spacing:.04em;margin-bottom:5px}
+.form-label span{font-weight:400;text-transform:none;font-size:11px;color:var(--muted)}
+.form-input{width:100%;padding:9px 12px;border:1px solid var(--border);border-radius:4px;font-size:13px;background:#fff}
+.form-input:focus{outline:none;border-color:var(--navy);box-shadow:0 0 0 3px rgba(13,24,56,.08)}
+.form-grid{display:grid;grid-template-columns:1fr 1fr;gap:12px}
+.form-select{width:100%;padding:9px 12px;border:1px solid var(--border);border-radius:4px;font-size:13px;background:#fff}
+
+/* Step footer */
+.step-footer{display:flex;justify-content:space-between;align-items:center;margin-top:24px;padding-top:16px;border-top:1px solid var(--border)}
+
+/* Loading overlay */
+.loading-overlay{display:none;position:fixed;inset:0;background:rgba(13,24,56,.6);z-index:500;align-items:center;justify-content:center;flex-direction:column;gap:16px;color:#fff}
+.loading-overlay.open{display:flex}
+.spinner{width:40px;height:40px;border:3px solid rgba(255,255,255,.2);border-top:3px solid #fff;border-radius:50%;animation:spin .8s linear infinite}
+@keyframes spin{to{transform:rotate(360deg)}}
+
+/* Empty state */
+.empty-state{text-align:center;padding:48px 24px;color:var(--muted)}
+.empty-state-icon{font-size:40px;margin-bottom:12px}
+.empty-state-title{font-size:15px;font-weight:600;margin-bottom:6px;color:var(--navy)}
+
+/* Info block */
+.info-block{background:#EFF6FF;border-left:4px solid var(--blue);padding:12px 16px;border-radius:0 4px 4px 0;font-size:13px;color:#1E40AF;margin-bottom:16px}
+.warn-block{background:#FFFBEB;border-left:4px solid var(--amber);padding:12px 16px;border-radius:0 4px 4px 0;font-size:13px;color:#92400E;margin-bottom:16px}
+
+/* Two-col layout */
+.two-col{display:grid;grid-template-columns:1fr 1fr;gap:20px}
+@media(max-width:700px){.two-col{grid-template-columns:1fr}}
+
+select,input[type=text],input[type=number]{font-family:inherit}
+</style>
+</head>
+<body>
+
+<!-- HEADER -->
+<div class="header">
+  <div class="header-brand">
+    <h1>Validação de Extratos v8.0</h1>
+    <p>Stoic Capital — Pipeline estruturado</p>
+  </div>
+  <div class="header-actions">
+    <button class="btn-header-ghost" onclick="openModal('configModal')">⚙ Configurações</button>
+    <button class="btn-header" onclick="confirmarLimpar()">↺ Recomeçar</button>
+  </div>
+</div>
+
+<!-- STEPPER -->
+<div class="stepper">
+  <button class="step-btn active" id="stepBtn1" onclick="goTab(1)">
+    <span class="step-num" id="stepNum1">1</span> Upload
+  </button>
+  <button class="step-btn" id="stepBtn2" onclick="goTab(2)">
+    <span class="step-num" id="stepNum2">2</span> Verificação
+  </button>
+  <button class="step-btn" id="stepBtn3" onclick="goTab(3)">
+    <span class="step-num" id="stepNum3">3</span> Processar
+  </button>
+  <button class="step-btn" id="stepBtn4" onclick="goTab(4)">
+    <span class="step-num" id="stepNum4">4</span> Revisão
+  </button>
+  <button class="step-btn" id="stepBtn5" onclick="goTab(5)">
+    <span class="step-num" id="stepNum5">5</span> Exportar
+  </button>
+</div>
+
+<!-- CONTAINER -->
+<div class="container">
+
+<!-- ===== TAB 1: UPLOAD ===== -->
+<div id="tab1" class="tab-content active">
+  <div id="alert1" class="alert"></div>
+  <div class="card">
+    <div class="upload-zone" id="uploadZone">
+      <div class="upload-icon">📂</div>
+      <h3>Arraste seus extratos aqui</h3>
+      <p>ou clique para selecionar arquivos</p>
+      <p style="margin-top:8px;font-size:11px;color:#9CA3AF">Aceita: CSV, XLS, XLSX &nbsp;|&nbsp; Máximo: 100 MB por envio</p>
+      <input type="file" id="fileInput" multiple accept=".csv,.xls,.xlsx" style="display:none">
+    </div>
+  </div>
+
+  <div class="card" id="fileListCard" style="display:none">
+    <div class="section-header">
+      <span class="section-title">Arquivos carregados</span>
+      <span class="section-count" id="fileCount">0 arquivo(s)</span>
+    </div>
+    <div id="fileList"></div>
+  </div>
+
+  <div class="step-footer">
+    <span></span>
+    <button class="btn btn-primary" onclick="avancarPara(2)">Próxima: Verificação →</button>
+  </div>
+</div>
+
+<!-- ===== TAB 2: VERIFICAÇÃO ===== -->
+<div id="tab2" class="tab-content">
+  <div id="alert2" class="alert"></div>
+  <div class="card">
+    <div class="info-block">
+      Para cada arquivo, confirme a qual unidade ele pertence. A detecção automática usa o nome do arquivo
+      com fuzzy matching — confirme ou corrija antes de processar.
+    </div>
+    <div id="tabelaVerificacaoWrap">
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th>Arquivo</th>
+              <th>Unidade detectada</th>
+              <th>Confiança</th>
+              <th>Confirmar unidade</th>
+              <th style="text-align:center">Status</th>
+              <th style="text-align:center">Preview</th>
+            </tr>
+          </thead>
+          <tbody id="bodyVerificacao"></tbody>
+        </table>
+      </div>
+    </div>
+    <div id="verificacaoVazia" class="empty-state" style="display:none">
+      <div class="empty-state-icon">📂</div>
+      <div class="empty-state-title">Nenhum arquivo carregado</div>
+      <p>Volte ao passo anterior e faça upload dos extratos.</p>
+    </div>
+  </div>
+  <div class="step-footer">
+    <button class="btn btn-ghost" onclick="goTab(1)">← Voltar</button>
+    <button class="btn btn-primary" onclick="avancarPara(3)">Próxima: Processar →</button>
+  </div>
+</div>
+
+<!-- ===== TAB 3: PROCESSAR ===== -->
+<div id="tab3" class="tab-content">
+  <div id="alert3" class="alert"></div>
+  <div class="card">
+    <h2 style="font-size:16px;font-weight:700;color:var(--navy);margin-bottom:16px">Configurações de processamento</h2>
+    <div class="warn-block" id="warnPendentes" style="display:none">
+      <strong>Atenção:</strong> <span id="txtPendentes"></span> — lançamentos sem unidade serão marcados como Grupo B automaticamente.
+    </div>
+    <div class="two-col" style="margin-bottom:20px">
+      <div class="form-group">
+        <label class="form-label">Modo</label>
+        <select id="modoProcessamento" class="form-select" onchange="toggleMesAno()">
+          <option value="todos">Todos os meses (sem filtro de data)</option>
+          <option value="mes">Filtrar por mês/ano específico</option>
+        </select>
+      </div>
+      <div id="filtroMesAno" style="display:none">
+        <div class="form-grid">
+          <div class="form-group">
+            <label class="form-label">Mês</label>
+            <select id="mes" class="form-select">
+              <option value="1">Janeiro</option><option value="2">Fevereiro</option>
+              <option value="3">Março</option><option value="4">Abril</option>
+              <option value="5">Maio</option><option value="6">Junho</option>
+              <option value="7">Julho</option><option value="8">Agosto</option>
+              <option value="9">Setembro</option><option value="10">Outubro</option>
+              <option value="11">Novembro</option><option value="12">Dezembro</option>
+            </select>
+          </div>
+          <div class="form-group">
+            <label class="form-label">Ano</label>
+            <input type="number" id="ano" class="form-input" value="2025" min="2020" max="2030">
+          </div>
+        </div>
+      </div>
+    </div>
+    <button class="btn btn-gold" id="btnProcessar" onclick="processar()" style="font-size:14px;padding:11px 24px">
+      ▶ Iniciar Processamento
+    </button>
+  </div>
+
+  <!-- Progress -->
+  <div class="card" id="progressCard" style="display:none">
+    <div class="section-header">
+      <span class="section-title">Processando...</span>
+    </div>
+    <div class="progress-wrap"><div class="progress-fill" id="progressBar" style="width:0%"></div></div>
+    <div class="progress-label" id="progressLabel">Aguardando...</div>
+  </div>
+
+  <!-- Resultado -->
+  <div class="card" id="resultadoCard" style="display:none">
+    <div class="section-header">
+      <span class="section-title">Resultado do processamento</span>
+    </div>
+    <div class="stats-grid">
+      <div class="stat-card"><div class="stat-label">Total linhas</div><div class="stat-value" id="rTotal">0</div></div>
+      <div class="stat-card"><div class="stat-label">Grupo A</div><div class="stat-value green" id="rGrupoA">0</div></div>
+      <div class="stat-card"><div class="stat-label">Grupo B</div><div class="stat-value amber" id="rGrupoB">0</div></div>
+    </div>
+    <div style="margin-top:16px">
+      <p style="font-size:13px;font-weight:600;color:var(--navy);margin-bottom:10px">Mapeamento de colunas detectado:</p>
+      <div class="schema-grid" id="schemaGrid"></div>
+    </div>
+  </div>
+
+  <div class="step-footer">
+    <button class="btn btn-ghost" onclick="goTab(2)">← Voltar</button>
+    <button class="btn btn-primary" id="btnParaRevisao" onclick="avancarPara(4)" disabled>Próxima: Revisão →</button>
+  </div>
+</div>
+
+<!-- ===== TAB 4: REVISÃO ===== -->
+<div id="tab4" class="tab-content">
+  <div id="alert4" class="alert"></div>
+
+  <div class="group-tab-nav">
+    <button class="group-tab-btn active" id="gtbA" onclick="switchGroupTab('A')">
+      Grupo A — Confiável <span id="countA" class="badge badge-a" style="margin-left:6px">0</span>
+    </button>
+    <button class="group-tab-btn" id="gtbB" onclick="switchGroupTab('B')">
+      Grupo B — Revisão humana <span id="countB" class="badge badge-b" style="margin-left:6px">0</span>
+    </button>
+  </div>
+
+  <!-- Grupo A -->
+  <div id="panelA">
+    <div class="card">
+      <div class="section-header">
+        <div>
+          <span class="section-title">Grupo A</span>
+          <p style="font-size:12px;color:var(--muted);margin-top:3px">Todos os campos âncora presentes e unidade confirmada. Confirme em lote ou individualmente.</p>
+        </div>
+        <button class="btn btn-success" onclick="confirmarGrupoA()">✓ Confirmar todos A</button>
+      </div>
+      <div id="alertGrupoA" class="alert"></div>
+      <div class="table-wrap" id="tabelaAWrap">
+        <table id="tabelaA">
+          <thead>
+            <tr>
+              <th>Data</th><th>Valor</th><th>Tipo</th><th style="min-width:200px">Descrição</th>
+              <th>Unidade</th><th>Arquivo</th><th>Conf.</th><th style="text-align:center">Status</th><th></th>
+            </tr>
+          </thead>
+          <tbody id="bodyA"></tbody>
+        </table>
+      </div>
+      <div id="emptyA" class="empty-state" style="display:none">
+        <div class="empty-state-icon">✓</div>
+        <div class="empty-state-title">Nenhum lançamento no Grupo A</div>
+      </div>
+      <div id="paginacaoA" class="pagination"></div>
+    </div>
+  </div>
+
+  <!-- Grupo B -->
+  <div id="panelB" style="display:none">
+
+    <!-- Painel de ações em bloco -->
+    <div class="card" id="blocoCard" style="display:none">
+      <div class="section-header" style="margin-bottom:12px">
+        <div>
+          <span class="section-title">Ações em lote</span>
+          <p style="font-size:12px;color:var(--muted);margin-top:3px">
+            Confirme ou exclua grupos inteiros de uma vez — por tipo de problema, por arquivo ou por unidade.
+          </p>
+        </div>
+        <button class="btn btn-ghost btn-sm" onclick="toggleBlocoPanel()">▲ Recolher</button>
+      </div>
+
+      <!-- Sub-tabs por eixo -->
+      <div class="group-tab-nav" style="margin-bottom:16px">
+        <button class="group-tab-btn active" id="blocoTabIssue"   onclick="switchBlocoTab('issue',this)">Por Problema</button>
+        <button class="group-tab-btn"        id="blocoTabArquivo" onclick="switchBlocoTab('arquivo',this)">Por Arquivo</button>
+        <button class="group-tab-btn"        id="blocoTabUnidade" onclick="switchBlocoTab('unidade',this)">Por Unidade</button>
+      </div>
+
+      <!-- Eixo: Issue -->
+      <div id="blocoIssue">
+        <table style="font-size:13px">
+          <thead><tr>
+            <th style="width:40%">Tipo de problema</th>
+            <th style="width:10%;text-align:center">Pendentes</th>
+            <th style="text-align:center">Ações em lote</th>
+          </tr></thead>
+          <tbody id="blocoBodyIssue"></tbody>
+        </table>
+      </div>
+
+      <!-- Eixo: Arquivo -->
+      <div id="blocoArquivo" style="display:none">
+        <table style="font-size:13px">
+          <thead><tr>
+            <th style="width:60%">Arquivo</th>
+            <th style="width:10%;text-align:center">Pendentes</th>
+            <th style="text-align:center">Ações em lote</th>
+          </tr></thead>
+          <tbody id="blocoBodyArquivo"></tbody>
+        </table>
+      </div>
+
+      <!-- Eixo: Unidade -->
+      <div id="blocoUnidade" style="display:none">
+        <table style="font-size:13px">
+          <thead><tr>
+            <th style="width:50%">Unidade</th>
+            <th style="width:10%;text-align:center">Pendentes</th>
+            <th style="text-align:center">Ações em lote</th>
+          </tr></thead>
+          <tbody id="blocoBodyUnidade"></tbody>
+        </table>
+      </div>
+    </div>
+
+    <!-- Botão para expandir o painel quando recolhido -->
+    <div id="blocoCollapsed" style="display:none;margin-bottom:16px">
+      <button class="btn btn-ghost btn-sm" onclick="toggleBlocoPanel()">▼ Ações em lote</button>
+    </div>
+
+    <!-- Tabela de lançamentos -->
+    <div class="card">
+      <div class="section-header">
+        <div>
+          <span class="section-title">Grupo B</span>
+          <p style="font-size:12px;color:var(--muted);margin-top:3px">Dados incompletos ou unidade incerta. Edite, confirme ou exclua cada item.</p>
+        </div>
+        <span id="bPendentesCount" class="badge badge-b" style="font-size:13px;padding:5px 12px"></span>
+      </div>
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th>Data</th><th>Valor</th><th>Tipo</th><th style="min-width:180px">Descrição</th>
+              <th>Unidade</th><th>Problemas</th><th style="text-align:center">Ações</th>
+            </tr>
+          </thead>
+          <tbody id="bodyB"></tbody>
+        </table>
+      </div>
+      <div id="emptyB" class="empty-state" style="display:none">
+        <div class="empty-state-icon">✓</div>
+        <div class="empty-state-title">Nenhum item pendente no Grupo B</div>
+      </div>
+      <div id="paginacaoB" class="pagination"></div>
+    </div>
+  </div>
+
+  <div class="step-footer">
+    <button class="btn btn-ghost" onclick="goTab(3)">← Voltar</button>
+    <button class="btn btn-primary" onclick="avancarPara(5)">Próxima: Exportar →</button>
+  </div>
+</div>
+
+<!-- ===== TAB 5: EXPORTAR ===== -->
+<div id="tab5" class="tab-content">
+  <div id="alert5" class="alert"></div>
+  <div class="card">
+    <h2 style="font-size:16px;font-weight:700;color:var(--navy);margin-bottom:16px">Resumo da sessão</h2>
+    <div class="stats-grid" id="statsExport"></div>
+  </div>
+  <div class="card">
+    <h2 style="font-size:16px;font-weight:700;color:var(--navy);margin-bottom:12px">Exportar Excel</h2>
+    <p style="font-size:13px;color:var(--muted);margin-bottom:20px">
+      O arquivo inclui 3 abas: <strong>BD_Extratos</strong> (dados normalizados),
+      <strong>De_Para</strong> (mapeamento de colunas detectado) e
+      <strong>Sumario</strong> (totais e métricas).
+    </p>
+    <div id="warnBPendentes" class="warn-block" style="display:none">
+      <strong>Atenção:</strong> <span id="txtBPendentes"></span> item(s) do Grupo B ainda sem ação. Serão exportados como "pendente" — revise na aba anterior se necessário.
+    </div>
+    <button class="btn btn-gold" onclick="exportar()" style="font-size:14px;padding:11px 24px">
+      ⬇ Baixar BD_Extratos.xlsx
+    </button>
+  </div>
+  <div class="step-footer">
+    <button class="btn btn-ghost" onclick="goTab(4)">← Voltar</button>
+    <span></span>
+  </div>
+</div>
+
+</div><!-- /container -->
+
+<!-- ===== MODAL: EDITAR LANÇAMENTO (Grupo B) ===== -->
+<div id="editModal" class="modal-overlay" onclick="closeModalOverlay(event,'editModal')">
+  <div class="modal">
+    <div class="modal-header">
+      <span class="modal-title">Editar lançamento</span>
+      <button class="modal-close" onclick="closeModal('editModal')">×</button>
+    </div>
+    <div class="info-block" id="editIssues" style="margin-bottom:16px"></div>
+    <input type="hidden" id="editId">
+    <div class="form-grid">
+      <div class="form-group">
+        <label class="form-label">Data</label>
+        <input type="text" id="editData" class="form-input" placeholder="YYYY-MM-DD">
+      </div>
+      <div class="form-group">
+        <label class="form-label">Valor <span>(positivo)</span></label>
+        <input type="number" id="editValor" class="form-input" step="0.01" min="0" placeholder="0.00">
+      </div>
+    </div>
+    <div class="form-group">
+      <label class="form-label">Tipo</label>
+      <select id="editTipo" class="form-select">
+        <option value="entrada">Entrada</option>
+        <option value="saida">Saída</option>
+        <option value="indefinido">Indefinido</option>
+      </select>
+    </div>
+    <div class="form-group">
+      <label class="form-label">Descrição</label>
+      <input type="text" id="editDescricao" class="form-input" placeholder="Histórico do lançamento">
+    </div>
+    <div class="form-group">
+      <label class="form-label">Unidade</label>
+      <select id="editUnidadeId" class="form-select"></select>
+    </div>
+    <div class="form-grid">
+      <div class="form-group">
+        <label class="form-label">Conta <span>(opcional)</span></label>
+        <input type="text" id="editConta" class="form-input">
+      </div>
+      <div class="form-group">
+        <label class="form-label">Banco <span>(opcional)</span></label>
+        <input type="text" id="editBanco" class="form-input">
+      </div>
+      <div class="form-group">
+        <label class="form-label">CNPJ <span>(opcional)</span></label>
+        <input type="text" id="editCNPJ" class="form-input">
+      </div>
+      <div class="form-group">
+        <label class="form-label">Centro de Custo <span>(opcional)</span></label>
+        <input type="text" id="editCentroCusto" class="form-input">
+      </div>
+    </div>
+    <div class="modal-footer">
+      <button class="btn btn-ghost" onclick="closeModal('editModal')">Cancelar</button>
+      <button class="btn btn-danger btn-sm" onclick="acaoLancamento(document.getElementById('editId').value,'excluir')">✕ Excluir</button>
+      <button class="btn btn-success" onclick="salvarEdicao()">✓ Confirmar e salvar</button>
+    </div>
+  </div>
+</div>
+
+<!-- ===== MODAL: CONFIGURAÇÕES ===== -->
+<div id="configModal" class="modal-overlay" onclick="closeModalOverlay(event,'configModal')">
+  <div class="modal" style="max-width:760px">
+    <div class="modal-header">
+      <span class="modal-title">⚙ Configurações</span>
+      <button class="modal-close" onclick="closeModal('configModal')">×</button>
+    </div>
+    <div class="group-tab-nav" style="margin-bottom:20px">
+      <button class="group-tab-btn active" onclick="switchConfigTab('unidades',this)">Unidades</button>
+      <button class="group-tab-btn" onclick="switchConfigTab('depara',this)">De-Para de Colunas</button>
+    </div>
+
+    <!-- Unidades -->
+    <div id="configPanelUnidades">
+      <div style="display:grid;grid-template-columns:1fr 1fr 1fr auto;gap:8px;margin-bottom:16px;align-items:end">
+        <div class="form-group" style="margin:0">
+          <label class="form-label">ID</label>
+          <input type="text" id="cfg-id" class="form-input" placeholder="MN610">
+        </div>
+        <div class="form-group" style="margin:0">
+          <label class="form-label">Marca</label>
+          <input type="text" id="cfg-marca" class="form-input" placeholder="Manta">
+        </div>
+        <div class="form-group" style="margin:0">
+          <label class="form-label">Descrição</label>
+          <input type="text" id="cfg-desc" class="form-input" placeholder="Manta 610">
+        </div>
+        <button class="btn btn-primary" onclick="adicionarUnidade()">+ Adicionar</button>
+      </div>
+      <div id="alertConfig" class="alert"></div>
+      <div class="table-wrap">
+        <table><thead><tr><th>ID</th><th>Marca</th><th>Descrição</th><th style="text-align:center">Ação</th></tr></thead>
+        <tbody id="bodyUnidades"></tbody></table>
+      </div>
+    </div>
+
+    <!-- De-Para -->
+    <div id="configPanelDepara" style="display:none">
+      <div class="info-block" style="margin-bottom:12px">
+        Mapeamento de colunas aprendido automaticamente e salvo em <strong>config.json</strong>.
+        Edite ou exclua entradas incorretas. Adicione manualmente se necessário.
+        O "Resetar" apaga tudo — o sistema redescobre na próxima execução.
+      </div>
+
+      <!-- Adicionar entrada manual -->
+      <div style="display:grid;grid-template-columns:1fr 1fr auto;gap:8px;margin-bottom:16px;align-items:end;padding:12px;background:var(--bg);border-radius:4px;border:1px solid var(--border)">
+        <div class="form-group" style="margin:0">
+          <label class="form-label">Coluna original <span>(exata, case-sensitive)</span></label>
+          <input type="text" id="dp-col" class="form-input" placeholder="Vlr_Lancamento">
+        </div>
+        <div class="form-group" style="margin:0">
+          <label class="form-label">Anchor destino</label>
+          <select id="dp-anchor" class="form-select">
+            <option value="">-- Selecione --</option>
+            <option>Data</option><option>Valor</option><option>Debito</option>
+            <option>Credito</option><option>Tipo</option><option>Descricao</option>
+            <option>Conta</option><option>Banco</option><option>CNPJ</option>
+            <option>Centro_Custo</option>
+          </select>
+        </div>
+        <button class="btn btn-primary" onclick="adicionarDepara()">+ Adicionar</button>
+      </div>
+
+      <div id="alertDepara" class="alert"></div>
+
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th>Coluna original</th>
+              <th>Anchor atual</th>
+              <th>Alterar para</th>
+              <th style="text-align:center">Ação</th>
+            </tr>
+          </thead>
+          <tbody id="bodyDepara"></tbody>
+        </table>
+      </div>
+      <p id="emptyDepara" style="text-align:center;padding:24px;color:var(--muted);display:none">
+        Nenhum mapeamento registrado. Execute o processamento para gerar automaticamente.
+      </p>
+
+      <div style="margin-top:16px;display:flex;justify-content:flex-end">
+        <button class="btn btn-danger btn-sm" onclick="resetDepara()">⚠ Resetar de-para</button>
+      </div>
+    </div>
+
+    <div class="modal-footer">
+      <button class="btn btn-primary" onclick="closeModal('configModal')">Fechar</button>
+    </div>
+  </div>
+</div>
+
+<!-- ===== LOADING OVERLAY ===== -->
+<div class="loading-overlay" id="loadingOverlay">
+  <div class="spinner"></div>
+  <p id="loadingMsg" style="font-size:14px">Processando...</p>
+</div>
+
+<script>
+// ========== STATE ==========
+const S = {
+  tab: 1,
+  unidades: [],
+  arquivos: [],
+  lancamentos: { a: [], b: [] },
+  pageA: 1, pageB: 1,
+  perPage: 50,
+  groupTab: 'A',
+  processado: false,
+};
+
+// ========== INIT ==========
+document.addEventListener('DOMContentLoaded', () => {
+  setupUpload();
+  loadArquivos();
+  loadUnidades();
+});
+
+// ========== NAVIGATION ==========
+function goTab(n) {
+  for (let i = 1; i <= 5; i++) {
+    document.getElementById(`tab${i}`).classList.toggle('active', i === n);
+    const btn = document.getElementById(`stepBtn${i}`);
+    btn.classList.toggle('active', i === n);
+    if (i < n && !btn.classList.contains('done')) btn.classList.add('done');
+  }
+  S.tab = n;
+  if (n === 2) loadVerificacao();
+  if (n === 4) { loadGrupoA(); loadGrupoB(); loadGroupCounts(); loadBlocoResumo(); }
+  if (n === 5) loadResumo();
+  window.scrollTo(0, 0);
+}
+
+async function avancarPara(n) {
+  const r = await api(`/api/gate/${n-1}`);
+  if (!r.ok && n > 1) {
+    showAlert(`alert${n-1}`, r.msg || 'Resolva os pendentes antes de avançar.', 'error');
+    return;
+  }
+  if (r.msg) showAlert(`alert${n-1}`, r.msg, 'warn');
+  if (n === 3 && r.pendentes && r.pendentes.length) {
+    document.getElementById('warnPendentes').style.display = 'block';
+    document.getElementById('txtPendentes').textContent = r.pendentes.length + ' arquivo(s) sem unidade confirmada';
+  }
+  goTab(n);
+}
+
+// ========== API ==========
+async function api(url, method='GET', body=null) {
+  const opts = { method, headers: {} };
+  if (body) { opts.headers['Content-Type'] = 'application/json'; opts.body = JSON.stringify(body); }
+  try {
+    const r = await fetch(url, opts);
+    return await r.json();
+  } catch(e) { return { ok: false, msg: String(e) }; }
+}
+
+// ========== ALERTS ==========
+function showAlert(id, msg, type='info') {
+  const el = document.getElementById(id);
+  if (!el) return;
+  el.className = `alert alert-${type} show`;
+  el.textContent = msg;
+  if (type !== 'error') setTimeout(() => el.classList.remove('show'), 5000);
+}
+function hideAlert(id) {
+  const el = document.getElementById(id);
+  if (el) el.classList.remove('show');
+}
+
+// ========== TAB 1: UPLOAD ==========
+function setupUpload() {
+  const zone = document.getElementById('uploadZone');
+  const input = document.getElementById('fileInput');
+  zone.addEventListener('click', () => input.click());
+  zone.addEventListener('dragover', e => { e.preventDefault(); zone.classList.add('dragover'); });
+  zone.addEventListener('dragleave', () => zone.classList.remove('dragover'));
+  zone.addEventListener('drop', e => {
+    e.preventDefault(); zone.classList.remove('dragover');
+    if (e.dataTransfer.files.length) { input.files = e.dataTransfer.files; handleUpload(); }
+  });
+  input.addEventListener('change', handleUpload);
+}
+
+async function handleUpload() {
+  const files = document.getElementById('fileInput').files;
+  if (!files.length) return;
+  const fd = new FormData();
+  for (const f of files) fd.append('files', f);
+
+  showAlert('alert1', 'Enviando arquivos...', 'info');
+  const r = await fetch('/api/upload', { method:'POST', body:fd }).then(r=>r.json());
+
+  const dupl  = (r.rejected||[]).filter(x => x.motivo.includes('idêntico') || x.motivo.includes('mesmo nome'));
+  const erros = (r.rejected||[]).filter(x => !x.motivo.includes('idêntico') && !x.motivo.includes('mesmo nome'));
+
+  if (r.uploaded && r.uploaded.length) {
+    showAlert('alert1', `${r.uploaded.length} arquivo(s) adicionado(s).`, 'success');
+  }
+  if (dupl.length) {
+    showAlert('alert1',
+      `${dupl.length} duplicata(s) ignorada(s): ${dupl.map(x=>`"${x.filename}" — ${x.motivo}`).join(' | ')}`,
+      'warn');
+  }
+  if (erros.length) {
+    showAlert('alert1',
+      erros.map(x=>`${x.filename}: ${x.motivo}`).join(' | '),
+      'error');
+  }
+  if (!r.uploaded?.length && !dupl.length && !erros.length) {
+    showAlert('alert1', 'Nenhum arquivo processado.', 'warn');
+  }
+
+  document.getElementById('fileInput').value = '';
+  loadArquivos();
+}
+
+async function loadArquivos() {
+  const r = await api('/api/arquivos');
+  S.arquivos = r.arquivos || [];
+  renderFileList();
+}
+
+function renderFileList() {
+  const list = document.getElementById('fileList');
+  const card = document.getElementById('fileListCard');
+  const count = document.getElementById('fileCount');
+  if (!S.arquivos.length) { card.style.display = 'none'; return; }
+  card.style.display = 'block';
+  count.textContent = `${S.arquivos.length} arquivo(s)`;
+  list.innerHTML = S.arquivos.map(a => `
+    <div class="file-item">
+      <span class="file-icon">📄</span>
+      <div class="file-info">
+        <div class="file-name">${a.filename}
+          <span class="file-preview-badge badge-cinza" id="prev-${esc(a.filename)}">—</span>
+        </div>
+        <div class="file-meta">${fmtSize(a.size)}</div>
+      </div>
+      <button class="btn btn-ghost btn-sm" onclick="loadPreview('${esc(a.filename)}')">↻ Preview</button>
+      <button class="btn btn-danger btn-sm" onclick="removerArquivo('${esc(a.filename)}')">✕</button>
+    </div>
+  `).join('');
+}
+
+async function loadPreview(fn) {
+  const badge = document.getElementById(`prev-${fn}`);
+  if (badge) { badge.textContent = '...'; badge.className = 'file-preview-badge badge-cinza'; }
+  const r = await api(`/api/preview/${encodeURIComponent(fn)}`);
+  if (!r.ok) {
+    if (badge) { badge.textContent = 'erro'; badge.className = 'file-preview-badge badge-err'; }
+    return;
+  }
+  const e = `${r.rows} linhas | E: ${fmtMoeda(r.sum_entrada)} | S: ${fmtMoeda(r.sum_saida)}`;
+  if (badge) { badge.textContent = e; badge.className = 'file-preview-badge badge-ok'; }
+}
+
+async function removerArquivo(fn) {
+  await fetch(`/api/remover-arquivo/${encodeURIComponent(fn)}`, { method:'DELETE' });
+  loadArquivos();
+}
+
+// ========== TAB 2: VERIFICAÇÃO ==========
+async function loadVerificacao() {
+  const r = await api('/api/verificar-documentos');
+  const docs = r.documentos || [];
+  const vazia = document.getElementById('verificacaoVazia');
+  const wrap = document.getElementById('tabelaVerificacaoWrap');
+
+  if (!docs.length) { vazia.style.display='block'; wrap.style.display='none'; return; }
+  vazia.style.display='none'; wrap.style.display='block';
+
+  const opcoes = S.unidades.map(u =>
+    `<option value="${u.id}">${u.id} — ${u.marca} | ${u.desc_unidade}</option>`
+  ).join('');
+
+  document.getElementById('bodyVerificacao').innerHTML = docs.map(doc => {
+    const sel = doc.confirmada || doc.detectada || '';
+    const corConf = doc.confianca >= 80 ? '#27AE60' : doc.confianca >= 60 ? '#F5A623' : '#E53E3E';
+    const isVerif = doc.confirmada || doc.confianca >= 80;
+    const prev = doc.preview;
+    const prevHtml = prev && prev.ok
+      ? `<span style="font-size:11px;color:var(--muted)">${prev.rows} lin | E: ${fmtMoeda(prev.sum_entrada)} | S: ${fmtMoeda(prev.sum_saida)}</span>`
+      : `<button class="btn btn-ghost btn-sm" onclick="loadPreviewVerif('${esc(doc.filename)}')">Carregar</button>`;
+    return `
+      <tr id="vrow-${esc(doc.filename)}">
+        <td style="max-width:200px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-weight:600" title="${doc.filename}">${doc.filename}</td>
+        <td>${doc.detectada ? `<span class="badge badge-cinza">${doc.detectada}</span>` : '<span style="color:var(--muted)">—</span>'}</td>
+        <td>
+          <div style="display:flex;align-items:center;gap:6px">
+            <div class="conf-bar-wrap"><div class="conf-bar-fill" style="width:${doc.confianca}%;background:${corConf}">${doc.confianca}%</div></div>
+            <span style="font-size:11px;color:var(--muted)">${doc.metodo}</span>
+          </div>
+        </td>
+        <td>
+          <select style="width:100%;padding:6px 8px;border:1px solid var(--border);border-radius:4px;font-size:12px"
+                  onchange="confirmarUnidade('${esc(doc.filename)}',this.value)">
+            <option value="">-- Selecione --</option>
+            ${S.unidades.map(u => `<option value="${u.id}" ${sel===u.id?'selected':''}>${u.id} — ${u.desc_unidade}</option>`).join('')}
+          </select>
+        </td>
+        <td style="text-align:center">
+          <span class="badge ${isVerif?'badge-verde':'badge-amarelo'}" id="vstatus-${esc(doc.filename)}">
+            ${isVerif ? '✓ Verif.' : '⚠ Pend.'}
+          </span>
+        </td>
+        <td style="text-align:center" id="vprev-${esc(doc.filename)}">${prevHtml}</td>
+      </tr>`;
+  }).join('');
+}
+
+async function loadPreviewVerif(fn) {
+  const cell = document.getElementById(`vprev-${fn}`);
+  if (cell) cell.innerHTML = '<span style="color:var(--muted);font-size:11px">...</span>';
+  const r = await api(`/api/preview/${encodeURIComponent(fn)}`);
+  if (cell && r.ok)
+    cell.innerHTML = `<span style="font-size:11px;color:var(--muted)">${r.rows} lin | E: ${fmtMoeda(r.sum_entrada)} | S: ${fmtMoeda(r.sum_saida)}</span>`;
+  else if (cell)
+    cell.innerHTML = '<span style="font-size:11px;color:var(--red)">erro</span>';
+}
+
+async function confirmarUnidade(fn, uid) {
+  await api('/api/confirmar-unidade', 'POST', { filename: fn, unit_id: uid });
+  const badge = document.getElementById(`vstatus-${fn}`);
+  if (badge) {
+    badge.className = `badge ${uid ? 'badge-verde' : 'badge-amarelo'}`;
+    badge.textContent = uid ? '✓ Verif.' : '⚠ Pend.';
+  }
+}
+
+// ========== TAB 3: PROCESSAR ==========
+function toggleMesAno() {
+  const modo = document.getElementById('modoProcessamento').value;
+  document.getElementById('filtroMesAno').style.display = modo === 'mes' ? 'grid' : 'none';
+}
+
+let pollInterval = null;
+
+async function processar() {
+  const btn = document.getElementById('btnProcessar');
+  btn.disabled = true;
+  document.getElementById('progressCard').style.display = 'block';
+  document.getElementById('resultadoCard').style.display = 'none';
+  document.getElementById('btnParaRevisao').disabled = true;
+  hideAlert('alert3');
+
+  const modo = document.getElementById('modoProcessamento').value;
+  const body = { processar_todos: modo === 'todos' };
+  if (modo === 'mes') {
+    body.mes = parseInt(document.getElementById('mes').value);
+    body.ano = parseInt(document.getElementById('ano').value);
+  }
+
+  // Start polling progress
+  pollInterval = setInterval(pollProgresso, 600);
+
+  const r = await api('/api/processar', 'POST', body);
+  clearInterval(pollInterval);
+
+  document.getElementById('progressBar').style.width = '100%';
+  document.getElementById('progressLabel').textContent = 'Concluído';
+
+  btn.disabled = false;
+
+  if (!r.ok) {
+    showAlert('alert3', r.msg || 'Erro no processamento', 'error');
+    return;
+  }
+
+  document.getElementById('rTotal').textContent = r.total;
+  document.getElementById('rGrupoA').textContent = r.grupo_a;
+  document.getElementById('rGrupoB').textContent = r.grupo_b;
+
+  const grid = document.getElementById('schemaGrid');
+  grid.innerHTML = Object.entries(r.schema_map || {}).map(([col, anc]) =>
+    `<div class="schema-item">
+       <span class="schema-original" title="${col}">${col}</span>
+       <span class="schema-arrow">→</span>
+       <span class="schema-anchor">${anc}</span>
+     </div>`
+  ).join('');
+
+  document.getElementById('resultadoCard').style.display = 'block';
+  document.getElementById('btnParaRevisao').disabled = false;
+  S.processado = true;
+  showAlert('alert3', `Processamento concluído: ${r.total} lançamentos — Grupo A: ${r.grupo_a}, Grupo B: ${r.grupo_b}`, 'success');
+}
+
+async function pollProgresso() {
+  const r = await api('/api/progresso');
+  document.getElementById('progressBar').style.width = `${r.pct}%`;
+  document.getElementById('progressLabel').textContent = r.msg;
+}
+
+// ========== TAB 4: REVISÃO ==========
+function switchGroupTab(g) {
+  S.groupTab = g;
+  document.getElementById('gtbA').classList.toggle('active', g==='A');
+  document.getElementById('gtbB').classList.toggle('active', g==='B');
+  document.getElementById('panelA').style.display = g==='A' ? 'block' : 'none';
+  document.getElementById('panelB').style.display = g==='B' ? 'block' : 'none';
+}
+
+async function loadGroupCounts() {
+  const r = await api('/api/lancamentos?per_page=1');
+  document.getElementById('countA').textContent = r.grupo_a_total || 0;
+  document.getElementById('countB').textContent = r.grupo_b_total || 0;
+  document.getElementById('bPendentesCount').textContent = `${r.grupo_b_total || 0} itens`;
+}
+
+async function loadGrupoA(page=1) {
+  S.pageA = page;
+  const r = await api(`/api/lancamentos?grupo=A&page=${page}&per_page=${S.perPage}`);
+  const items = r.items || [];
+  const tbody = document.getElementById('bodyA');
+  const empty = document.getElementById('emptyA');
+
+  if (!items.length) {
+    tbody.innerHTML = '';
+    empty.style.display = 'block';
+    document.getElementById('tabelaAWrap').style.display = 'none';
+    return;
+  }
+  empty.style.display = 'none';
+  document.getElementById('tabelaAWrap').style.display = 'block';
+
+  tbody.innerHTML = items.map(l => `
+    <tr style="${l.status==='excluido'?'opacity:.45':''}">
+      <td>${l.Data || '<span style="color:var(--muted)">—</span>'}</td>
+      <td style="font-weight:600">${l.Valor != null ? fmtMoeda(l.Valor) : '—'}</td>
+      <td>${tipoBadge(l.Tipo)}</td>
+      <td style="max-width:240px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${esc(l.Descricao||'')}">${l.Descricao || '—'}</td>
+      <td><span class="badge badge-cinza">${l.unidade || l.unidade_id || '—'}</span></td>
+      <td style="font-size:11px;color:var(--muted);max-width:120px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${l.arquivo}</td>
+      <td>${confBadge(l.confiabilidade)}</td>
+      <td style="text-align:center">${statusBadge(l.status)}</td>
+      <td>
+        ${l.status!=='excluido' ? `<button class="btn btn-danger btn-sm" onclick="acaoLancamento('${esc(l.id)}','excluir')">✕</button>` : ''}
+      </td>
+    </tr>`).join('');
+
+  renderPaginacao('paginacaoA', r.page, r.pages, loadGrupoA);
+}
+
+async function loadGrupoB(page=1) {
+  S.pageB = page;
+  const r = await api(`/api/lancamentos?grupo=B&page=${page}&per_page=${S.perPage}`);
+  const items = r.items || [];
+  const tbody = document.getElementById('bodyB');
+  const empty = document.getElementById('emptyB');
+
+  if (!items.length) { tbody.innerHTML=''; empty.style.display='block'; return; }
+  empty.style.display = 'none';
+
+  const pendentes = items.filter(i => i.status === 'pendente').length;
+  document.getElementById('bPendentesCount').textContent = `${pendentes} pendentes`;
+
+  tbody.innerHTML = items.map(l => `
+    <tr style="${l.status!=='pendente'?'opacity:.5':''}">
+      <td>${l.Data || '<span style="color:var(--red);font-size:11px">ausente</span>'}</td>
+      <td style="font-weight:600">${l.Valor != null ? fmtMoeda(l.Valor) : '<span style="color:var(--red);font-size:11px">ausente</span>'}</td>
+      <td>${tipoBadge(l.Tipo)}</td>
+      <td style="max-width:200px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${esc(l.Descricao||'')}">${l.Descricao || '<span style="color:var(--muted)">—</span>'}</td>
+      <td><span class="badge badge-cinza">${l.unidade || l.unidade_id || '<span style="color:var(--red)">N/D</span>'}</span></td>
+      <td>${(l.issues||[]).map(iss => `<span class="issue-tag">${issueLabel(iss)}</span>`).join(' ')}</td>
+      <td style="text-align:center;white-space:nowrap">
+        ${l.status==='pendente' ? `
+          <button class="btn btn-primary btn-sm" onclick="abrirEditar(${JSON.stringify(l).replace(/"/g,'&quot;')})">✎ Editar</button>
+          <button class="btn btn-success btn-sm" style="margin-left:4px" onclick="acaoLancamento('${esc(l.id)}','confirmar')">✓</button>
+          <button class="btn btn-danger btn-sm" style="margin-left:4px" onclick="acaoLancamento('${esc(l.id)}','excluir')">✕</button>
+        ` : statusBadge(l.status)}
+      </td>
+    </tr>`).join('');
+
+  renderPaginacao('paginacaoB', r.page, r.pages, loadGrupoB);
+}
+
+async function confirmarGrupoA() {
+  const r = await api('/api/acao', 'POST', { acao: 'confirmar_grupo_a' });
+  if (r.ok) {
+    showAlert('alertGrupoA', `${r.n} lançamentos do Grupo A confirmados.`, 'success');
+    loadGrupoA(S.pageA);
+  }
+}
+
+async function acaoLancamento(id, acao) {
+  await api('/api/acao', 'POST', { id, acao });
+  closeModal('editModal');
+  loadGrupoA(S.pageA);
+  loadGrupoB(S.pageB);
+  loadGroupCounts();
+}
+
+function abrirEditar(l) {
+  document.getElementById('editId').value = l.id;
+  document.getElementById('editData').value = l.Data || '';
+  document.getElementById('editValor').value = l.Valor != null ? l.Valor : '';
+  document.getElementById('editTipo').value = l.Tipo || 'indefinido';
+  document.getElementById('editDescricao').value = l.Descricao || '';
+  document.getElementById('editConta').value = l.Conta || '';
+  document.getElementById('editBanco').value = l.Banco || '';
+  document.getElementById('editCNPJ').value = l.CNPJ || '';
+  document.getElementById('editCentroCusto').value = l.Centro_Custo || '';
+
+  const sel = document.getElementById('editUnidadeId');
+  sel.innerHTML = S.unidades.map(u =>
+    `<option value="${u.id}" ${l.unidade_id===u.id?'selected':''}>${u.id} — ${u.desc_unidade}</option>`
+  ).join('');
+  if (l.unidade_id) sel.value = l.unidade_id;
+
+  const issues = document.getElementById('editIssues');
+  if (l.issues && l.issues.length) {
+    issues.style.display='block';
+    issues.innerHTML = '<strong>Problemas detectados:</strong> ' + l.issues.map(issueLabel).join(', ');
+  } else {
+    issues.style.display='none';
+  }
+
+  openModal('editModal');
+}
+
+async function salvarEdicao() {
+  const id = document.getElementById('editId').value;
+  const uid = document.getElementById('editUnidadeId').value;
+  const uInfo = S.unidades.find(u => u.id === uid);
+  const campos = {
+    Data: document.getElementById('editData').value.trim() || null,
+    Valor: parseFloat(document.getElementById('editValor').value) || null,
+    Tipo: document.getElementById('editTipo').value,
+    Descricao: document.getElementById('editDescricao').value.trim(),
+    Conta: document.getElementById('editConta').value.trim(),
+    Banco: document.getElementById('editBanco').value.trim(),
+    CNPJ: document.getElementById('editCNPJ').value.trim(),
+    Centro_Custo: document.getElementById('editCentroCusto').value.trim(),
+    unidade_id: uid,
+    unidade: uInfo ? uInfo.desc_unidade : '',
+    marca: uInfo ? uInfo.marca : '',
+  };
+  await api('/api/acao', 'POST', { id, acao: 'editar', campos });
+  closeModal('editModal');
+  loadGrupoA(S.pageA);
+  loadGrupoB(S.pageB);
+  loadGroupCounts();
+}
+
+// ========== TAB 5: EXPORTAR ==========
+async function loadResumo() {
+  const r = await api('/api/resumo');
+  const grid = document.getElementById('statsExport');
+  const saldo = (r.sum_entradas || 0) - (r.sum_saidas || 0);
+  grid.innerHTML = `
+    <div class="stat-card"><div class="stat-label">Total lançamentos</div><div class="stat-value">${r.total}</div></div>
+    <div class="stat-card"><div class="stat-label">Confirmados</div><div class="stat-value green">${r.confirmados}</div></div>
+    <div class="stat-card"><div class="stat-label">Excluídos</div><div class="stat-value">${r.excluidos}</div></div>
+    <div class="stat-card"><div class="stat-label">Pendentes</div><div class="stat-value amber">${r.pendentes}</div></div>
+    <div class="stat-card"><div class="stat-label">Grupo A</div><div class="stat-value green">${r.grupo_a}</div></div>
+    <div class="stat-card"><div class="stat-label">Grupo B</div><div class="stat-value amber">${r.grupo_b}</div></div>
+    <div class="stat-card"><div class="stat-label">Total Entradas</div><div class="stat-value">${fmtMoeda(r.sum_entradas)}</div></div>
+    <div class="stat-card"><div class="stat-label">Total Saídas</div><div class="stat-value">${fmtMoeda(r.sum_saidas)}</div></div>
+    <div class="stat-card"><div class="stat-label">Saldo</div><div class="stat-value ${saldo>=0?'green':'red'}">${fmtMoeda(saldo)}</div></div>
+  `;
+
+  if (r.b_pendentes > 0) {
+    document.getElementById('warnBPendentes').style.display = 'block';
+    document.getElementById('txtBPendentes').textContent = r.b_pendentes;
+  }
+}
+
+function exportar() {
+  window.location.href = '/api/exportar';
+}
+
+// ========== CONFIGURAÇÕES ==========
+async function loadUnidades() {
+  const r = await api('/api/unidades');
+  S.unidades = r.unidades || [];
+  renderUnidades();
+}
+
+function renderUnidades() {
+  document.getElementById('bodyUnidades').innerHTML = S.unidades.map(u => `
+    <tr>
+      <td><strong>${u.id}</strong></td>
+      <td>${u.marca}</td>
+      <td>${u.desc_unidade}</td>
+      <td style="text-align:center">
+        <button class="btn btn-danger btn-sm" onclick="deletarUnidade('${esc(u.id)}')">✕ Excluir</button>
+      </td>
+    </tr>`).join('');
+}
+
+async function adicionarUnidade() {
+  const id   = document.getElementById('cfg-id').value.trim();
+  const marca = document.getElementById('cfg-marca').value.trim();
+  const desc  = document.getElementById('cfg-desc').value.trim();
+  if (!id || !marca || !desc) { showAlert('alertConfig','Preencha todos os campos','error'); return; }
+  const r = await api('/api/unidades','POST',{id,marca,desc_unidade:desc});
+  if (r.ok) {
+    S.unidades = r.unidades;
+    renderUnidades();
+    document.getElementById('cfg-id').value='';
+    document.getElementById('cfg-marca').value='';
+    document.getElementById('cfg-desc').value='';
+    showAlert('alertConfig','Unidade adicionada','success');
+  } else { showAlert('alertConfig', r.msg, 'error'); }
+}
+
+async function deletarUnidade(id) {
+  if (!confirm(`Excluir unidade ${id}?`)) return;
+  const r = await api('/api/unidades','DELETE',{id});
+  if (r.ok) { S.unidades = r.unidades || S.unidades.filter(u=>u.id!==id); renderUnidades(); }
+}
+
+function switchConfigTab(name, btn) {
+  document.querySelectorAll('#configModal .group-tab-btn').forEach(b=>b.classList.remove('active'));
+  btn.classList.add('active');
+  document.getElementById('configPanelUnidades').style.display = name==='unidades'?'block':'none';
+  document.getElementById('configPanelDepara').style.display   = name==='depara'?'block':'none';
+  if (name==='depara') loadDepara();
+}
+
+async function loadDepara() {
+  const r = await api('/api/depara');
+  const dp = r.depara || {};
+  const entries = Object.entries(dp);
+  const empty = document.getElementById('emptyDepara');
+  empty.style.display = entries.length ? 'none' : 'block';
+
+  const ANCHORS = ['Data','Valor','Debito','Credito','Tipo','Descricao',
+                   'Conta','Banco','CNPJ','Centro_Custo'];
+
+  document.getElementById('bodyDepara').innerHTML = entries.map(([col, anc]) => {
+    const opts = ANCHORS.map(a =>
+      `<option value="${a}" ${a===anc?'selected':''}>${a}</option>`
+    ).join('');
+    return `
+      <tr>
+        <td style="font-family:monospace;font-size:12px">${col}</td>
+        <td><span class="badge badge-cinza">${anc}</span></td>
+        <td>
+          <select id="dp-edit-${btoa(col).replace(/=/g,'')}"
+                  class="form-select" style="padding:5px 8px;font-size:12px"
+                  onchange="alterarDepara('${col.replace(/'/g,"\\'")}', this.value)">
+            ${opts}
+          </select>
+        </td>
+        <td style="text-align:center">
+          <button class="btn btn-danger btn-sm"
+                  onclick="excluirDepara('${col.replace(/'/g,"\\'")}')">✕</button>
+        </td>
+      </tr>`;
+  }).join('');
+}
+
+async function adicionarDepara() {
+  const col    = document.getElementById('dp-col').value.trim();
+  const anchor = document.getElementById('dp-anchor').value;
+  if (!col || !anchor) {
+    showAlert('alertDepara', 'Preencha coluna e anchor destino.', 'error'); return;
+  }
+  const r = await api('/api/depara', 'POST', { col_original: col, anchor });
+  if (r.ok) {
+    document.getElementById('dp-col').value = '';
+    document.getElementById('dp-anchor').value = '';
+    showAlert('alertDepara', `"${col}" → "${anchor}" salvo.`, 'success');
+    loadDepara();
+  } else { showAlert('alertDepara', r.msg, 'error'); }
+}
+
+async function alterarDepara(col, anchor) {
+  const r = await api('/api/depara', 'PUT', { col_original: col, anchor });
+  if (r.ok) {
+    showAlert('alertDepara', `"${col}" atualizado para "${anchor}".`, 'success');
+    loadDepara();
+  } else { showAlert('alertDepara', r.msg, 'error'); }
+}
+
+async function excluirDepara(col) {
+  if (!confirm(`Remover mapeamento de "${col}"?`)) return;
+  await api('/api/depara', 'DELETE', { col_original: col });
+  showAlert('alertDepara', `"${col}" removido.`, 'success');
+  loadDepara();
+}
+
+async function resetDepara() {
+  if (!confirm('Apagar TODO o de-para aprendido? O sistema irá redescobrir os mapeamentos na próxima execução.')) return;
+  await api('/api/depara/reset', 'POST');
+  showAlert('alertDepara', 'De-para resetado com sucesso.', 'success');
+  loadDepara();
+}
+
+// ========== MODAIS ==========
+function openModal(id) {
+  document.getElementById(id).classList.add('open');
+  if (id === 'configModal') { loadUnidades(); }
+}
+function closeModal(id) {
+  document.getElementById(id).classList.remove('open');
+}
+function closeModalOverlay(e, id) {
+  if (e.target.id === id) closeModal(id);
+}
+
+// ========== RESET ==========
+async function confirmarLimpar() {
+  if (!confirm('Recomeçar do zero? Todos os dados da sessão serão apagados.')) return;
+  document.getElementById('loadingOverlay').classList.add('open');
+  await api('/api/limpar','POST');
+  document.getElementById('loadingOverlay').classList.remove('open');
+  S.arquivos=[]; S.lancamentos={a:[],b:[]}; S.processado=false;
+  loadArquivos();
+  for (let i=1;i<=5;i++) {
+    document.getElementById(`stepBtn${i}`).classList.remove('done','active');
+  }
+  document.getElementById('resultadoCard').style.display='none';
+  document.getElementById('progressCard').style.display='none';
+  document.getElementById('btnParaRevisao').disabled=true;
+  goTab(1);
+}
+
+// ========== AÇÕES EM BLOCO — GRUPO B ==========
+
+let _blocoExpanded = true;
+
+function toggleBlocoPanel() {
+  _blocoExpanded = !_blocoExpanded;
+  document.getElementById('blocoCard').style.display     = _blocoExpanded ? 'block' : 'none';
+  document.getElementById('blocoCollapsed').style.display = _blocoExpanded ? 'none'  : 'block';
+}
+
+function switchBlocoTab(eixo, btn) {
+  document.querySelectorAll('#blocoCard .group-tab-btn').forEach(b => b.classList.remove('active'));
+  btn.classList.add('active');
+  ['Issue','Arquivo','Unidade'].forEach(e =>
+    document.getElementById(`bloco${e}`).style.display =
+      e.toLowerCase() === eixo ? 'block' : 'none'
+  );
+}
+
+async function loadBlocoResumo() {
+  const r = await api('/api/bloco-resumo');
+  if (!r.total_pendentes) {
+    document.getElementById('blocoCard').style.display     = 'none';
+    document.getElementById('blocoCollapsed').style.display = 'none';
+    return;
+  }
+  document.getElementById('blocoCard').style.display     = _blocoExpanded ? 'block' : 'none';
+  document.getElementById('blocoCollapsed').style.display = _blocoExpanded ? 'none'  : 'block';
+
+  renderBlocoTable('blocoBodyIssue',   r.por_issue,   'issue',   g => g.label, g => g.valor);
+  renderBlocoTable('blocoBodyArquivo', r.por_arquivo, 'arquivo', g => g.valor, g => g.valor);
+  renderBlocoTable('blocoBodyUnidade', r.por_unidade, 'unidade', g => g.valor, g => g.valor);
+}
+
+function renderBlocoTable(tbodyId, grupos, eixo, labelFn, valorFn) {
+  const tbody = document.getElementById(tbodyId);
+  if (!grupos.length) {
+    tbody.innerHTML = `<tr><td colspan="3" style="text-align:center;color:var(--muted);padding:16px">Nenhum pendente</td></tr>`;
+    return;
+  }
+  tbody.innerHTML = grupos.map(g => `
+    <tr>
+      <td style="font-size:13px;max-width:360px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap"
+          title="${esc(valorFn(g))}">${labelFn(g)}</td>
+      <td style="text-align:center">
+        <span class="badge badge-b">${g.count}</span>
+      </td>
+      <td style="text-align:center;white-space:nowrap">
+        <button class="btn btn-success btn-sm"
+                onclick="executarBloco('confirmar','${eixo}','${esc(valorFn(g))}',this)">
+          ✓ Confirmar ${g.count}
+        </button>
+        <button class="btn btn-danger btn-sm" style="margin-left:6px"
+                onclick="executarBloco('excluir','${eixo}','${esc(valorFn(g))}',this)">
+          ✕ Excluir ${g.count}
+        </button>
+      </td>
+    </tr>`).join('');
+}
+
+async function executarBloco(acao, eixo, valor, btn) {
+  const label = acao === 'confirmar' ? 'confirmar' : 'excluir';
+  if (!confirm(`${label.charAt(0).toUpperCase()+label.slice(1)} todos os pendentes do grupo "${valor}"?`)) return;
+
+  btn.disabled = true;
+  const r = await api('/api/acao-bloco', 'POST', { acao, eixo, valor });
+
+  if (r.ok) {
+    const tipo = acao === 'confirmar' ? 'success' : 'warn';
+    showAlert('alert4', `${r.n} lançamento(s) ${acao === 'confirmar' ? 'confirmados' : 'excluídos'}.`, tipo);
+    await loadBlocoResumo();
+    loadGrupoB(1);
+    loadGrupoA(S.pageA);
+    loadGroupCounts();
+  } else {
+    showAlert('alert4', r.msg || 'Erro na ação em bloco.', 'error');
+    btn.disabled = false;
+  }
+}
+
+// ========== PAGINATION ==========
+function renderPaginacao(id, page, pages, loadFn) {
+  const el = document.getElementById(id);
+  if (!el || pages <= 1) { if(el) el.innerHTML=''; return; }
+  let html = `<button class="page-btn" ${page<=1?'disabled':''} onclick="(${loadFn.name})(${page-1})">‹</button>`;
+  const start = Math.max(1, page-2), end = Math.min(pages, page+2);
+  for (let p=start; p<=end; p++) {
+    html += `<button class="page-btn ${p===page?'active':''}" onclick="(${loadFn.name})(${p})">${p}</button>`;
+  }
+  html += `<button class="page-btn" ${page>=pages?'disabled':''} onclick="(${loadFn.name})(${page+1})">›</button>`;
+  html += `<span class="page-info">Pág. ${page} de ${pages}</span>`;
+  el.innerHTML = html;
+}
+
+// ========== FORMATTERS ==========
+function fmtMoeda(v) {
+  if (v == null) return '—';
+  return 'R$ ' + parseFloat(v).toLocaleString('pt-BR', {minimumFractionDigits:2,maximumFractionDigits:2});
+}
+function fmtSize(bytes) {
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024*1024) return `${(bytes/1024).toFixed(1)} KB`;
+  return `${(bytes/1024/1024).toFixed(1)} MB`;
+}
+function esc(s) { return String(s||'').replace(/'/g,"\\'").replace(/"/g,'&quot;'); }
+
+function tipoBadge(t) {
+  if (t==='entrada') return '<span class="badge badge-entrada">↑ Entrada</span>';
+  if (t==='saida')   return '<span class="badge badge-saida">↓ Saída</span>';
+  return '<span class="badge badge-indef">? Indef.</span>';
+}
+function confBadge(c) {
+  if (!c) return '';
+  const cl = {ALTA:'badge-alta',MÉDIA:'badge-media',BAIXA:'badge-baixa'}[c] || 'badge-cinza';
+  return `<span class="badge ${cl}">${c}</span>`;
+}
+function statusBadge(s) {
+  const cl = {confirmado:'badge-confirmado',pendente:'badge-pendente',excluido:'badge-excluido'}[s]||'badge-cinza';
+  return `<span class="badge ${cl}">${s}</span>`;
+}
+function issueLabel(iss) {
+  const labels = {
+    data_ausente:'Data ausente', valor_ausente:'Valor ausente',
+    descricao_ausente:'Desc. ausente', tipo_indefinido:'Tipo indefinido',
+    unidade_incerta:'Unidade incerta',
+  };
+  return labels[iss] || iss;
+}
+</script>
+</body>
+</html>

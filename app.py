@@ -54,6 +54,7 @@ import pandas as pd
 from werkzeug.utils import secure_filename
 from datetime import datetime
 import io
+from ofxparser import OfxParser
 
 # ============================================================
 # CONFIGURAÇÃO FLASK
@@ -65,7 +66,7 @@ UPLOAD_FOLDER = Path(__file__).parent / 'uploads'
 UPLOAD_FOLDER.mkdir(exist_ok=True)
 app.config['UPLOAD_FOLDER'] = UPLOAD_FOLDER
 CONFIG_PATH = Path(__file__).parent / 'config.json'
-ALLOWED_EXT = {'csv', 'xls', 'xlsx', 'pdf'}
+ALLOWED_EXT = {'csv', 'xls', 'xlsx', 'pdf', 'ofx'}
 
 # Importação tolerante do extrator de PDF (módulo opcional)
 try:
@@ -431,7 +432,7 @@ def classificar(row_norm: dict, unit_conf: int, unit_confirmada: bool) -> tuple[
 
 def ler_df(filepath: str, filename: str) -> pd.DataFrame:
     """
-    Lê CSV ou XLSX para DataFrame com todas as colunas como string.
+    Lê CSV, XLSX, OFX ou PDF para DataFrame com todas as colunas como string.
     Aplica fillna('') para eliminar float NaN antes do pipeline.
     CSV: testa encodings utf-8, latin-1, cp1252 em sequência.
     Retorna DataFrame vazio em caso de falha.
@@ -448,6 +449,20 @@ def ler_df(filepath: str, filename: str) -> pd.DataFrame:
         elif ext in ['xls', 'xlsx']:
             df = pd.read_excel(filepath, dtype=str)
             return df.fillna('')
+        elif ext == 'ofx':
+            with open(filepath, 'rb') as f:
+                ofx = OfxParser.parse(f)
+            rows = []
+            for txn in ofx.account.statement.transactions:
+                rows.append({
+                    'Data': txn.date.strftime('%d/%m/%Y'),
+                    'Valor': str(txn.amount),
+                    'Descricao': txn.memo or txn.payee or '',
+                    'Tipo': 'entrada' if txn.amount >= 0 else 'saida',
+                })
+            if not rows:
+                return pd.DataFrame()
+            return pd.DataFrame(rows).astype(str)
         elif ext == 'pdf':
             if not HAS_PDF_EXTRACTOR:
                 print(f"[LEITURA] PDF {filename}: extrator indisponível")
@@ -585,7 +600,7 @@ def index():
 def upload():
     """
     Recebe arquivos com três camadas de validação:
-      1. Extensão: apenas CSV, XLS, XLSX
+      1. Extensão: apenas CSV, XLS, XLSX, OFX, PDF
       2. Nome duplicado na sessão
       3. Conteúdo duplicado (MD5)
     Retorna listas 'uploaded' e 'rejected' com motivos.

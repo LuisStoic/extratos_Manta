@@ -1,0 +1,11 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(mv app_extratos_v8/app_v8/app.py .)",
+      "Bash(mv app_extratos_v8/app_v8/pdf_extractor.py .)",
+      "Bash(mv app_extratos_v8/app_v8/requirements.txt .)",
+      "Bash(mv app_extratos_v8/app_v8/config.json .)",
+      "Bash(mv app_extratos_v8/app_v8/INICIAR.bat .)"
+    ]
+  }
+}

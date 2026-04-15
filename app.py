@@ -123,7 +123,7 @@ ANCHOR_MAPS = {
     'Valor': [
         'valor', 'value', 'amount', 'vlr', 'vlr_lancamento', 'vl_lancamento',
         'importancia', 'montante', 'valorlancamento', 'valortransacao', 'vlrlancamento',
-        'valor_transacao', 'valor_operacao', 'lancamento',
+        'valor_transacao', 'valor_operacao',
     ],
     # Débito/Crédito separados — padrão de alguns bancos (ex: BRB, BB)
     'Debito': [
@@ -142,7 +142,7 @@ ANCHOR_MAPS = {
     ],
     'Descricao': [
         'descricao', 'description', 'memo', 'historico', 'complemento',
-        'detalhe', 'nome', 'descr', 'discriminacao',
+        'detalhe', 'detalhes', 'nome', 'descr', 'discriminacao', 'lancamento',
         'historico_lancamento', 'descricao_lancamento', 'detalhe_lancamento',
         'historico_extrato', 'historico_banco',
     ],
@@ -601,6 +601,21 @@ def _read_excel_smart_header(filepath: str) -> pd.DataFrame:
                 break
         if cut_idx is not None:
             df = df.iloc[:cut_idx].reset_index(drop=True)
+
+    # Resolve ambiguidade do nome 'Lançamento': em BRB legacy é coluna monetária,
+    # em BB/outros é descrição. Decide pelo conteúdo: se >70% das cells parecem
+    # valor monetário, renomeia para 'Valor'.
+    rx_money = re.compile(r'^[+-]?\s*[\d.,]+[+-]?$')
+    for c in list(df.columns):
+        if str(c).strip().lower() in ('lançamento', 'lancamento'):
+            sample = [str(v).strip() for v in df[c].tolist() if str(v).strip()]
+            if not sample:
+                continue
+            hits = sum(1 for v in sample if rx_money.match(v))
+            if hits / len(sample) >= 0.7:
+                cols = list(df.columns)
+                cols[cols.index(c)] = 'Valor'
+                df.columns = cols
 
     return df
 

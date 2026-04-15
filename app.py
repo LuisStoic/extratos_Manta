@@ -54,7 +54,7 @@ import pandas as pd
 from werkzeug.utils import secure_filename
 from datetime import datetime
 import io
-from ofxparser import OfxParser
+from ofxparse import OfxParser
 
 # ============================================================
 # CONFIGURAÇÃO FLASK
@@ -123,7 +123,7 @@ ANCHOR_MAPS = {
     'Valor': [
         'valor', 'value', 'amount', 'vlr', 'vlr_lancamento', 'vl_lancamento',
         'importancia', 'montante', 'valorlancamento', 'valortransacao', 'vlrlancamento',
-        'valor_transacao', 'valor_operacao',
+        'valor_transacao', 'valor_operacao', 'lancamento',
     ],
     # Débito/Crédito separados — padrão de alguns bancos (ex: BRB, BB)
     'Debito': [
@@ -138,10 +138,11 @@ ANCHOR_MAPS = {
     'Tipo': [
         'tipo', 'type', 'natureza', 'trntype', 'dc', 'debito_credito',
         'tipo_lancamento', 'tipo_transacao', 'natureza_lancamento', 'indicador',
+        'movimentacao',
     ],
     'Descricao': [
         'descricao', 'description', 'memo', 'historico', 'complemento',
-        'detalhe', 'lancamento', 'nome', 'descr', 'discriminacao',
+        'detalhe', 'nome', 'descr', 'discriminacao',
         'historico_lancamento', 'descricao_lancamento', 'detalhe_lancamento',
         'historico_extrato', 'historico_banco',
     ],
@@ -303,15 +304,26 @@ def inv_mapa(schema_map: dict) -> dict:
 def parse_valor(v) -> float | None:
     """
     Converte valor monetário (string ou número) para float.
-    Lida com formatos BR: vírgula decimal, ponto milhar, R$.
+    Lida com formatos BR: vírgula decimal, ponto milhar, R$,
+    sinal negativo à direita (BRB: '84.000,00-').
     Retorna None para nan, vazio ou não-parseável.
     """
     if v is None: return None
     s = str(v).strip()
     if s.lower() in ('nan', 'nat', 'none', ''): return None
-    s = re.sub(r'[R$\s\u00a0\xa0]', '', s).replace(',', '.')
+    s = re.sub(r'[R$\s\u00a0\xa0]', '', s)
+
+    # Sinal negativo posterior (BRB): "84.000,00-"
+    sinal = -1.0 if s.endswith('-') else 1.0
+    s = s.rstrip('-').lstrip('+')
+
+    # Formato BR ('.' milhar, ',' decimal) vs US/canônico ('.' decimal)
+    if ',' in s and '.' in s:
+        s = s.replace('.', '').replace(',', '.')
+    elif ',' in s:
+        s = s.replace(',', '.')
     try:
-        return float(s)
+        return float(s) * sinal
     except:
         return None
 
@@ -430,6 +442,169 @@ def classificar(row_norm: dict, unit_conf: int, unit_confirmada: bool) -> tuple[
 # HELPERS — LEITURA DE ARQUIVOS
 # ============================================================
 
+_HEADER_KEYS = re.compile(
+    r'data|hist[óo]rico|descri[çc][ãa]o|valor|saldo|d[ée]bito|cr[ée]dito|'
+    r'lan[çc]amento|movimenta[çc][ãa]o|transa[çc][ãa]o|documento',
+    re.IGNORECASE,
+)
+
+_DATE_RX = re.compile(r'\d{1,2}[/\-.]\d{1,2}[/\-.]\d{2,4}|\d{4}-\d{2}-\d{2}')
+
+def _split_merged_header(raw_row: list, ncols: int) -> list:
+    """Quando a linha de header é uma única célula merged ('Data  Histórico  Valor'),
+    quebra em pedaços por 2+ espaços e distribui pelas n colunas reais."""
+    texto = ' '.join(str(c).strip() for c in raw_row if pd.notna(c) and str(c).strip())
+    if not texto:
+        return [f'col_{i}' for i in range(ncols)]
+    pedacos = [p for p in re.split(r'\s{2,}|\t|\n', texto) if p.strip()]
+    if len(pedacos) >= 2:
+        if len(pedacos) < ncols:
+            pedacos += [f'col_{i}' for i in range(len(pedacos), ncols)]
+        return pedacos[:ncols]
+    return [f'col_{i}' for i in range(ncols)]
+
+def _read_excel_smart_header(filepath: str) -> pd.DataFrame:
+    """Detecta a linha de header em xlsx/xls. Para BRB e Santander pdf-gerado
+    o header não está na linha 0. Estratégia:
+      1. Encontrar primeira linha com data → essa é a linha de dados.
+      2. Header = linha imediatamente anterior (com mais keywords).
+      3. Se header tiver poucas células (merged), quebrar por espaços múltiplos.
+    """
+    raw = pd.read_excel(filepath, dtype=str, header=None)
+    if raw.empty:
+        return pd.DataFrame()
+
+    # Identifica linhas com data nas primeiras células (transação, não metadado).
+    def _row_tem_data(i):
+        for c in raw.iloc[i].tolist()[:4]:
+            if pd.notna(c):
+                s = str(c).strip()
+                if _DATE_RX.fullmatch(s):
+                    return True
+                p = s.split()[0] if s else ''
+                if p and _DATE_RX.fullmatch(p):
+                    return True
+        return False
+
+    # Início real dos dados = primeira posição com >=3 linhas de data consecutivas
+    # (ou >=2 se o arquivo for muito pequeno). Evita falso positivo em linhas
+    # de metadado tipo "Data de Emissão: 2025-01-31".
+    def _row_vazia(i):
+        return all(pd.isna(c) or not str(c).strip() for c in raw.iloc[i].tolist())
+
+    primeira_data = None
+    limite = min(60, len(raw))
+    min_consec = 2
+    for i in range(limite):
+        if _row_tem_data(i):
+            # Conta linhas-data dentro de janela curta, tolerando linhas vazias
+            consec = 1
+            for j in range(i + 1, min(i + 6, len(raw))):
+                if _row_tem_data(j):
+                    consec += 1
+                elif _row_vazia(j):
+                    continue
+                else:
+                    break
+            if consec >= min_consec:
+                primeira_data = i
+                break
+
+    if primeira_data is None or primeira_data == 0:
+        return pd.read_excel(filepath, dtype=str).fillna('')
+
+    # Procura header nas linhas anteriores (até 5 acima): a melhor por keywords
+    melhor_idx, melhor_score = primeira_data - 1, -1
+    for i in range(max(0, primeira_data - 5), primeira_data):
+        celulas = [str(c).strip() for c in raw.iloc[i].tolist() if pd.notna(c) and str(c).strip()]
+        if not celulas:
+            continue
+        texto = ' '.join(celulas)
+        score = len(_HEADER_KEYS.findall(texto))
+        if score > melhor_score:
+            melhor_score, melhor_idx = score, i
+
+    # Mantém só colunas com dados na faixa de transações (descarta colunas
+    # totalmente vazias intercaladas, comum em BRB Ludika).
+    data_rows = raw.iloc[primeira_data:].copy()
+    cols_uteis_idx = [j for j in range(data_rows.shape[1])
+                      if data_rows.iloc[:, j].notna().any()
+                      and (data_rows.iloc[:, j].astype(str).str.strip() != '').any()]
+    data_rows = data_rows.iloc[:, cols_uteis_idx]
+    ncols = data_rows.shape[1]
+
+    raw_header_full = raw.iloc[melhor_idx].tolist()
+    raw_header = [raw_header_full[j] for j in cols_uteis_idx]
+    cells_validas = [c for c in raw_header if pd.notna(c) and str(c).strip()]
+
+    if len(cells_validas) < 2:
+        headers = _split_merged_header(raw_header, ncols)
+    else:
+        # NÃO dividimos cells merged aqui — isso quebraria o alinhamento com
+        # as colunas de dados (que não foram merged). O pós-processamento
+        # abaixo extrai data+histórico de uma célula colada.
+        headers = [str(c).strip() if pd.notna(c) and str(c).strip() else f'col_{j}'
+                   for j, c in enumerate(raw_header)]
+        if len(headers) < ncols:
+            headers += [f'col_{i}' for i in range(len(headers), ncols)]
+        headers = headers[:ncols]
+
+    df = data_rows.copy()
+    df.columns = headers
+    df = df.reset_index(drop=True).fillna('')
+
+    # Pós-processamento BRB legacy: cabeçalho merged tipo "Data Histórico" e
+    # cells de dados com "DD/MM/AA HISTÓRICO" coladas. Splitamos a coluna
+    # criando 'Histórico' nova logo após 'Data'.
+    col_data = None
+    for c in df.columns:
+        nome = str(c).strip().lower()
+        if nome == 'data' or len(_HEADER_KEYS.findall(nome)) >= 2:
+            col_data = c
+            break
+    col_hist = next((c for c in df.columns
+                     if re.search(r'hist[óo]rico|descri[çc][ãa]o', str(c), re.IGNORECASE)
+                     and c != col_data), None)
+    if col_data is not None and col_hist is None and len(_HEADER_KEYS.findall(str(col_data).lower())) >= 2:
+        # Renomeia 'Data Histórico' para 'Data' e cria coluna 'Histórico' adjacente
+        idx = list(df.columns).index(col_data)
+        cols = list(df.columns)
+        cols[idx] = 'Data'
+        df.columns = cols
+        col_data = 'Data'
+        col_hist = 'Histórico'
+        df.insert(idx + 1, col_hist, '')
+    if col_data is not None:
+        rx_data = re.compile(r'^(\d{1,2}[/\-.]\d{1,2}[/\-.]\d{2,4})\s+(.*)$', re.DOTALL)
+        for i in df.index:
+            cell = str(df.at[i, col_data]).strip()
+            m = rx_data.match(cell)
+            if m:
+                df.at[i, col_data] = m.group(1)
+                resto = m.group(2).strip()
+                if col_hist is not None and resto:
+                    atual = str(df.at[i, col_hist]).strip()
+                    df.at[i, col_hist] = resto if not atual else f"{resto} {atual}".strip()
+
+        # Trunca ao primeiro Data inválido após início (corta rodapés tipo
+        # "Mensagem Institucional" no AQUAFAN ou "SALDO POUPANCA SALARIO" no BRB_610).
+        rx_so_data = re.compile(r'^\d{1,2}[/\-.]\d{1,2}[/\-.]\d{2,4}$|^\d{4}-\d{2}-\d{2}')
+        encontrou_dado = False
+        cut_idx = None
+        for i in df.index:
+            cell = str(df.at[i, col_data]).strip()
+            valido = bool(rx_so_data.match(cell))
+            if valido:
+                encontrou_dado = True
+            elif encontrou_dado:
+                cut_idx = i
+                break
+        if cut_idx is not None:
+            df = df.iloc[:cut_idx].reset_index(drop=True)
+
+    return df
+
+
 def ler_df(filepath: str, filename: str) -> pd.DataFrame:
     """
     Lê CSV, XLSX, OFX ou PDF para DataFrame com todas as colunas como string.
@@ -447,7 +622,7 @@ def ler_df(filepath: str, filename: str) -> pd.DataFrame:
                 except:
                     pass
         elif ext in ['xls', 'xlsx']:
-            df = pd.read_excel(filepath, dtype=str)
+            df = _read_excel_smart_header(filepath)
             return df.fillna('')
         elif ext == 'ofx':
             with open(filepath, 'rb') as f:
@@ -852,6 +1027,16 @@ def processar():
                 t     = str(extras.get('extra_Transação') or extras.get('extra_Transacao') or '').strip()
                 ident = str(extras.get('extra_Identificação') or extras.get('extra_Identificacao') or '').strip()
                 partes = [p for p in [t, ident] if p and p.lower() not in ('nan','none','')]
+                if partes: descricao_raw = ' | '.join(partes)
+
+            # ── B4: Descrição de extras (Stone Comprovante) ──────────────────
+            # Stone tem coluna 'Tipo' como categoria ("Recebível de Cartão",
+            # "PIX Recebido") + 'Destino' / 'Origem' como contraparte.
+            if not descricao_raw:
+                cat = str(extras.get('extra_Tipo') or '').strip()
+                dst = str(extras.get('extra_Destino') or extras.get('extra_Origem') or '').strip()
+                partes = [p for p in [cat, dst]
+                          if p and p.lower() not in ('nan','none','desconhecido','')]
                 if partes: descricao_raw = ' | '.join(partes)
 
             row_norm = {

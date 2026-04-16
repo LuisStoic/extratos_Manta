@@ -57,37 +57,9 @@
     }
   ],
   "depara": {
-    "Tipo": "Tipo",
-    "Valor": "Valor",
     "Data": "Data",
-    "Origem": "Banco",
-    "Descrição": "Descricao"
+    "Descrição": "Descricao",
+    "Valor": "Valor"
   },
-  "fn_patterns": {
-    "AQUAFAN_BRB_01-26": "MN610",
-    "AQUAFAN_BRB_02-26": "MN610",
-    "AQUAFAN_BRB_11-25": "MN610",
-    "AQUAFAN_BRB_12-25": "MN610",
-    "FILIAL__JBMANTA-NATACAO-E": "MNJB",
-    "FILIALJB_MANTA-NATACAO-E-": "MNJB",
-    "MANTA-NATACAO-E-FORMACAO-": "MNJB",
-    "VP_MANTA_01012024_A_31122": "MNVP",
-    "VP_MANTA_01012025_A_30102": "MNVP",
-    "RAIA-CLUB-608S_01012024_A": "MNVP",
-    "RAIA-CLUB-608S_01012025_A": "MNVP",
-    "RAIA-CLUB-608S_01112025_A": "RC608",
-    "RC_608_RC_-_2024_COMPROVA": "RC608",
-    "RC_608_RC_-_2025_COMPROVA": "RC608",
-    "RC_608_RC608_COMPROVANTE_": "RC608",
-    "RC_608__COMPROVANTE_DE_EX": "RC608",
-    "TORPEDO_SANTANDER_01-26": "MN610",
-    "TORPEDO_SANTANDER_02-26": "MN610",
-    "TORPEDO_BRB_01-26": "MN610",
-    "TORPEDO_BRB_02-26": "MN610",
-    "TORPEDO_BRB_11-25": "MN610",
-    "TORPEDO_BRB_12-25": "MN610",
-    "EXTRATO_BRB_RAIA_10_NOV.2": "MN610",
-    "FILIAL_-_2025_COMPROVANTE": "MN303",
-    "FILIAL_2024_COMPROVANTE_D": "MN303"
-  }
+  "fn_patterns": {}
 }

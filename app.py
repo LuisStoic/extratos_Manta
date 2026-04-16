@@ -377,9 +377,9 @@ def detectar_tipo(row: dict, inv: dict) -> tuple[str, str]:
     if col_tipo:
         v = str(row.get(col_tipo, '')).strip().upper()
         MAPA_TIPO = {
-            'D':'saida','DEB':'saida','DEBITO':'saida','DEBIT':'saida',
+            'D':'saida','DEB':'saida','DEBITO':'saida','DÉBITO':'saida','DEBIT':'saida',
             'SAIDA':'saida','SAÍDA':'saida','-1':'saida',
-            'C':'entrada','CRED':'entrada','CREDITO':'entrada','CREDIT':'entrada',
+            'C':'entrada','CRED':'entrada','CREDITO':'entrada','CRÉDITO':'entrada','CREDIT':'entrada',
             'ENTRADA':'entrada','+1':'entrada','DEPÓSITO':'entrada','DEPOSITO':'entrada',
         }
         if v in MAPA_TIPO:

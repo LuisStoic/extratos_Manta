@@ -5,9 +5,9 @@ werkzeug>=2.3
 gunicorn>=21.2
 ofxparse>=0.21
 xlrd>=2.0
-# PDF extraction (cascata + fallback) — opcionais
+# PDF extraction — pdfplumber é suficiente para a maioria dos PDFs
 pdfplumber>=0.11
-pymupdf>=1.24
-# OCR (opcional, requer Tesseract instalado no SO)
-# pytesseract>=0.3
-# pdf2image>=1.17
+# pymupdf é fallback opcional (requer compilação C, pode falhar em PaaS)
+# Instale manualmente se necessário: pip install pymupdf
+# pytesseract e pdf2image requerem Tesseract instalado no SO
+

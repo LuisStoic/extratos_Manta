@@ -337,6 +337,19 @@ def extrair_pdf(filepath: str, filename: str = '') -> tuple[pd.DataFrame, list]:
 
     normalizados = []
     for df in dfs_ordenados:
+        # Desambigua colunas duplicadas antes de concatenar
+        seen = {}
+        new_cols = []
+        for c in df.columns:
+            if c in seen:
+                seen[c] += 1
+                new_cols.append(f'{c}_{seen[c]}')
+            else:
+                seen[c] = 0
+                new_cols.append(c)
+        df = df.copy()
+        df.columns = new_cols
+
         if list(df.columns) == base_cols:
             normalizados.append(df)
         elif len(df.columns) == len(base_cols):
@@ -344,7 +357,6 @@ def extrair_pdf(filepath: str, filename: str = '') -> tuple[pd.DataFrame, list]:
             df2.columns = base_cols
             normalizados.append(df2)
         else:
-            # Página com layout diferente — registra mas não descarta
             warnings_global.append(
                 f'[{nome}] Página com {len(df.columns)} cols ≠ base {len(base_cols)} '
                 '— concatenada com merge tolerante'

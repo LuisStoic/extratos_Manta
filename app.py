@@ -385,6 +385,15 @@ def detectar_tipo(row: dict, inv: dict) -> tuple[str, str]:
         if v in MAPA_TIPO:
             return MAPA_TIPO[v], 'alta'
 
+    # Infere tipo pela descrição (BRB PDFs onde sinal fica em coluna separada)
+    col_desc = inv.get('Descricao')
+    if col_desc:
+        desc_up = str(row.get(col_desc, '')).strip().upper()
+        if desc_up.startswith('DEBITO') or desc_up.startswith('DÉBITO'):
+            return 'saida', 'media'
+        if desc_up.startswith('CREDITO') or desc_up.startswith('CRÉDITO'):
+            return 'entrada', 'media'
+
     col_val = inv.get('Valor')
     if col_val:
         n = parse_valor(row.get(col_val))
@@ -994,6 +1003,16 @@ def processar():
                             if v not in ('', None) and 'Unnamed' not in k
                             and k not in ('extra_Nosso Número',))
             if anchors_p == 0 and extras_u == 0:
+                continue
+
+            # ── B1b: Descarta lixo de quebra de página em PDFs ───────────────
+            # PDFs extraídos repetem cabeçalhos ("Data", "Descrição", "Valor")
+            # e linhas como "Saldo Anterior" que não são transações reais.
+            desc_raw = str(rd.get(inv.get('Descricao',''),'') if inv.get('Descricao') else '').strip()
+            data_raw = str(rd.get(inv.get('Data',''),'') if inv.get('Data') else '').strip()
+            _LIXO_PDF = {'saldo anterior', 'saldo do dia', 'data', 'descrição', 'descricao',
+                         'valor', 'saldo', 'lançamentos', 'lancamentos', 'doc', 'mensagem institucional'}
+            if desc_raw.lower() in _LIXO_PDF or (not data_raw and not desc_raw):
                 continue
 
             tipo, tipo_conf = detectar_tipo(rd, inv)

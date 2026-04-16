@@ -971,127 +971,113 @@ def processar():
     todos = []
     total = len(SESSION['arquivos'])
 
+    erros_arquivos = []
     for idx, arq in enumerate(SESSION['arquivos']):
         fn  = arq['filename']
         pct = 5 + int((idx / total) * 90)
         SESSION['progresso'] = {'pct': pct, 'msg': f'Processando {fn} ({idx+1}/{total})...', 'ativo': True}
 
-        confirmada_id = SESSION['doc_verificados'].get(fn)
-        uid, confianca = (confirmada_id, 100) if confirmada_id else encontrar_unidade(fn)[:2]
-        unidade_info = next((u for u in CFG['unidades'] if u['id'] == uid), None) if uid else None
-        marca   = unidade_info['marca']        if unidade_info else 'N/D'
-        unidade = unidade_info['desc_unidade'] if unidade_info else 'N/D'
+        try:
+            confirmada_id = SESSION['doc_verificados'].get(fn)
+            uid, confianca = (confirmada_id, 100) if confirmada_id else encontrar_unidade(fn)[:2]
+            unidade_info = next((u for u in CFG['unidades'] if u['id'] == uid), None) if uid else None
+            marca   = unidade_info['marca']        if unidade_info else 'N/D'
+            unidade = unidade_info['desc_unidade'] if unidade_info else 'N/D'
 
-        df = ler_df(arq['path'], fn)
-        if df.empty: continue
+            df = ler_df(arq['path'], fn)
+            if df.empty: continue
 
-        file_schema = all_file_schemas.get(fn) or detectar_mapa(list(df.columns))
-        inv         = inv_mapa(file_schema)
+            file_schema = all_file_schemas.get(fn) or detectar_mapa(list(df.columns))
+            inv         = inv_mapa(file_schema)
 
-        for i, (_, row) in enumerate(df.iterrows()):
-            rd     = row.to_dict()
-            extras = {f'extra_{col}': val for col, val in rd.items()
-                      if not file_schema.get(col)}
+            for i, (_, row) in enumerate(df.iterrows()):
+                rd     = row.to_dict()
+                extras = {f'extra_{col}': val for col, val in rd.items()
+                          if not file_schema.get(col)}
 
-            # ── B1: Descarta linhas de resíduo de cabeçalho (BRB XLS) ─────────
-            # O BRB exporta rows de metadados antes dos dados reais
-            # ("Data: 09/03/2026", "Hora: 14:51:49"). Critério de descarte:
-            # zero anchors obrigatórios E zero extras com dado útil.
-            anchors_p = sum(1 for a in ['Data','Valor','Descricao']
-                            if rd.get(inv.get(a,''),'') not in ('', None))
-            extras_u  = sum(1 for k, v in extras.items()
-                            if v not in ('', None) and 'Unnamed' not in k
-                            and k not in ('extra_Nosso Número',))
-            if anchors_p == 0 and extras_u == 0:
-                continue
+                anchors_p = sum(1 for a in ['Data','Valor','Descricao']
+                                if rd.get(inv.get(a,''),'') not in ('', None))
+                extras_u  = sum(1 for k, v in extras.items()
+                                if v not in ('', None) and 'Unnamed' not in k
+                                and k not in ('extra_Nosso Número',))
+                if anchors_p == 0 and extras_u == 0:
+                    continue
 
-            # ── B1b: Descarta lixo de quebra de página em PDFs ───────────────
-            # PDFs extraídos repetem cabeçalhos ("Data", "Descrição", "Valor")
-            # e linhas como "Saldo Anterior" que não são transações reais.
-            desc_raw = str(rd.get(inv.get('Descricao',''),'') if inv.get('Descricao') else '').strip()
-            data_raw = str(rd.get(inv.get('Data',''),'') if inv.get('Data') else '').strip()
-            _LIXO_PDF = {'saldo anterior', 'saldo do dia', 'data', 'descrição', 'descricao',
-                         'valor', 'saldo', 'lançamentos', 'lancamentos', 'doc', 'mensagem institucional'}
-            if desc_raw.lower() in _LIXO_PDF or (not data_raw and not desc_raw):
-                continue
+                desc_raw = str(rd.get(inv.get('Descricao',''),'') if inv.get('Descricao') else '').strip()
+                data_raw = str(rd.get(inv.get('Data',''),'') if inv.get('Data') else '').strip()
+                _LIXO_PDF = {'saldo anterior', 'saldo do dia', 'data', 'descrição', 'descricao',
+                             'valor', 'saldo', 'lançamentos', 'lancamentos', 'doc', 'mensagem institucional'}
+                if desc_raw.lower() in _LIXO_PDF or (not data_raw and not desc_raw):
+                    continue
 
-            tipo, tipo_conf = detectar_tipo(rd, inv)
+                tipo, tipo_conf = detectar_tipo(rd, inv)
 
-            # Valor base
-            if inv.get('Debito') and inv.get('Credito'):
-                d = parse_valor(rd.get(inv['Debito']))
-                c = parse_valor(rd.get(inv['Credito']))
-                valor_abs = (abs(d) if tipo == 'saida' and d is not None
-                             else abs(c) if c is not None
-                             else abs(d) if d is not None else None)
-            elif inv.get('Valor'):
-                n = parse_valor(rd.get(inv['Valor']))
-                valor_abs = abs(n) if n is not None else None
-            else:
-                valor_abs = None
+                if inv.get('Debito') and inv.get('Credito'):
+                    d = parse_valor(rd.get(inv['Debito']))
+                    c = parse_valor(rd.get(inv['Credito']))
+                    valor_abs = (abs(d) if tipo == 'saida' and d is not None
+                                 else abs(c) if c is not None
+                                 else abs(d) if d is not None else None)
+                elif inv.get('Valor'):
+                    n = parse_valor(rd.get(inv['Valor']))
+                    valor_abs = abs(n) if n is not None else None
+                else:
+                    valor_abs = None
 
-            # ── B2: Valor de saldo (Stone Comprovante) ────────────────────────
-            # O Stone não exporta coluna "Valor". O valor está implícito em
-            # Saldo Antes e Saldo Depois. Calcula |SD − SA|.
-            # Tipo inferido de extra_Movimentação quando ainda indefinido.
-            if valor_abs is None:
-                sa_raw = extras.get('extra_Saldo antes') or extras.get('extra_Saldo Antes')
-                sd_raw = extras.get('extra_Saldo depois') or extras.get('extra_Saldo Depois')
-                if sa_raw and sd_raw:
-                    sa = parse_valor(str(sa_raw).replace('R$','').replace('.','').replace(',','.'))
-                    sd = parse_valor(str(sd_raw).replace('R$','').replace('.','').replace(',','.'))
-                    if sa is not None and sd is not None:
-                        v = round(abs(sd - sa), 2)
-                        valor_abs = v if v > 0 else None  # 0 = tarifa "Grátis"
-                if tipo == 'indefinido':
-                    mov = str(extras.get('extra_Movimentação') or
-                               extras.get('extra_Movimentacao', '')).strip().upper()
-                    if mov in ('CRÉDITO','CREDITO','CREDIT','CR'):
-                        tipo = 'entrada'; tipo_conf = 'alta'
-                    elif mov in ('DÉBITO','DEBITO','DEBIT','DB'):
-                        tipo = 'saida'; tipo_conf = 'alta'
+                if valor_abs is None:
+                    sa_raw = extras.get('extra_Saldo antes') or extras.get('extra_Saldo Antes')
+                    sd_raw = extras.get('extra_Saldo depois') or extras.get('extra_Saldo Depois')
+                    if sa_raw and sd_raw:
+                        sa = parse_valor(str(sa_raw).replace('R$','').replace('.','').replace(',','.'))
+                        sd = parse_valor(str(sd_raw).replace('R$','').replace('.','').replace(',','.'))
+                        if sa is not None and sd is not None:
+                            v = round(abs(sd - sa), 2)
+                            valor_abs = v if v > 0 else None
+                    if tipo == 'indefinido':
+                        mov = str(extras.get('extra_Movimentação') or
+                                   extras.get('extra_Movimentacao', '')).strip().upper()
+                        if mov in ('CRÉDITO','CREDITO','CREDIT','CR'):
+                            tipo = 'entrada'; tipo_conf = 'alta'
+                        elif mov in ('DÉBITO','DEBITO','DEBIT','DB'):
+                            tipo = 'saida'; tipo_conf = 'alta'
 
-            # Descrição base
-            descricao_raw = str(rd.get(inv['Descricao'],'') if inv.get('Descricao') else '').strip()
+                descricao_raw = str(rd.get(inv['Descricao'],'') if inv.get('Descricao') else '').strip()
 
-            # ── B3: Descrição de extras (Cora / GN) ──────────────────────────
-            # O Cora SCDFI não tem campo "Descrição". Informação equivalente:
-            # extra_Transação ("Pgto QR Code Pix") + extra_Identificação ("CEF").
-            if not descricao_raw:
-                t     = str(extras.get('extra_Transação') or extras.get('extra_Transacao') or '').strip()
-                ident = str(extras.get('extra_Identificação') or extras.get('extra_Identificacao') or '').strip()
-                partes = [p for p in [t, ident] if p and p.lower() not in ('nan','none','')]
-                if partes: descricao_raw = ' | '.join(partes)
+                if not descricao_raw:
+                    t     = str(extras.get('extra_Transação') or extras.get('extra_Transacao') or '').strip()
+                    ident = str(extras.get('extra_Identificação') or extras.get('extra_Identificacao') or '').strip()
+                    partes = [p for p in [t, ident] if p and p.lower() not in ('nan','none','')]
+                    if partes: descricao_raw = ' | '.join(partes)
 
-            # ── B4: Descrição de extras (Stone Comprovante) ──────────────────
-            # Stone tem coluna 'Tipo' como categoria ("Recebível de Cartão",
-            # "PIX Recebido") + 'Destino' / 'Origem' como contraparte.
-            if not descricao_raw:
-                cat = str(extras.get('extra_Tipo') or '').strip()
-                dst = str(extras.get('extra_Destino') or extras.get('extra_Origem') or '').strip()
-                partes = [p for p in [cat, dst]
-                          if p and p.lower() not in ('nan','none','desconhecido','')]
-                if partes: descricao_raw = ' | '.join(partes)
+                if not descricao_raw:
+                    cat = str(extras.get('extra_Tipo') or '').strip()
+                    dst = str(extras.get('extra_Destino') or extras.get('extra_Origem') or '').strip()
+                    partes = [p for p in [cat, dst]
+                              if p and p.lower() not in ('nan','none','desconhecido','')]
+                    if partes: descricao_raw = ' | '.join(partes)
 
-            row_norm = {
-                'Data':         parse_data(rd.get(inv['Data'])) if inv.get('Data') else None,
-                'Valor':        valor_abs,
-                'Tipo':         tipo,
-                'Descricao':    descricao_raw,
-                'Conta':        str(rd.get(inv['Conta'],        '') if inv.get('Conta')        else '').strip(),
-                'Banco':        str(rd.get(inv['Banco'],        '') if inv.get('Banco')        else '').strip(),
-                'CNPJ':         str(rd.get(inv['CNPJ'],         '') if inv.get('CNPJ')         else '').strip(),
-                'Centro_Custo': str(rd.get(inv['Centro_Custo'], '') if inv.get('Centro_Custo') else '').strip(),
-            }
+                row_norm = {
+                    'Data':         parse_data(rd.get(inv['Data'])) if inv.get('Data') else None,
+                    'Valor':        valor_abs,
+                    'Tipo':         tipo,
+                    'Descricao':    descricao_raw,
+                    'Conta':        str(rd.get(inv['Conta'],        '') if inv.get('Conta')        else '').strip(),
+                    'Banco':        str(rd.get(inv['Banco'],        '') if inv.get('Banco')        else '').strip(),
+                    'CNPJ':         str(rd.get(inv['CNPJ'],         '') if inv.get('CNPJ')         else '').strip(),
+                    'Centro_Custo': str(rd.get(inv['Centro_Custo'], '') if inv.get('Centro_Custo') else '').strip(),
+                }
 
-            grupo, conf, issues = classificar(row_norm, confianca, bool(confirmada_id))
-            todos.append({
-                'id': f"{fn}::{i}", 'arquivo': fn,
-                'unidade_id': uid or '', 'marca': marca, 'unidade': unidade,
-                'grupo': grupo, 'confiabilidade': conf, 'issues': issues,
-                'tipo_conf': tipo_conf, 'status': 'pendente',
-                **row_norm, 'extras': extras,
-            })
+                grupo, conf, issues = classificar(row_norm, confianca, bool(confirmada_id))
+                todos.append({
+                    'id': f"{fn}::{i}", 'arquivo': fn,
+                    'unidade_id': uid or '', 'marca': marca, 'unidade': unidade,
+                    'grupo': grupo, 'confiabilidade': conf, 'issues': issues,
+                    'tipo_conf': tipo_conf, 'status': 'pendente',
+                    **row_norm, 'extras': extras,
+                })
+        except Exception as e:
+            erros_arquivos.append(fn)
+            print(f"[PROCESSAR] Erro em {fn}: {e}")
 
     SESSION['lancamentos'] = todos
     SESSION['processado']  = True
@@ -1099,8 +1085,12 @@ def processar():
 
     ga = sum(1 for l in todos if l['grupo'] == 'A')
     gb = sum(1 for l in todos if l['grupo'] == 'B')
-    return jsonify({'ok': True, 'total': len(todos), 'grupo_a': ga, 'grupo_b': gb,
-                    'schema_map': {k: v for k, v in global_schema.items() if v}})
+    resp = {'ok': True, 'total': len(todos), 'grupo_a': ga, 'grupo_b': gb,
+            'schema_map': {k: v for k, v in global_schema.items() if v}}
+    if erros_arquivos:
+        resp['erros'] = erros_arquivos
+        resp['msg'] = f'{len(erros_arquivos)} arquivo(s) com erro: {", ".join(erros_arquivos)}'
+    return jsonify(resp)
 
 @app.route('/api/progresso')
 def progresso():

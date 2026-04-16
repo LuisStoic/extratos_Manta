@@ -236,7 +236,13 @@ select,input[type=text],input[type=number]{font-family:inherit}
       <div class="upload-icon">📂</div>
       <h3>Arraste seus extratos aqui</h3>
       <p>ou clique para selecionar arquivos</p>
-      <p style="margin-top:8px;font-size:11px;color:#9CA3AF">Aceita: CSV, XLS, XLSX &nbsp;|&nbsp; Máximo: 100 MB por envio</p>
+      <p style="margin-top:8px;font-size:11px;color:#9CA3AF">Aceita: CSV, XLS, XLSX, PDF, OFX &nbsp;|&nbsp; Máximo: 100 MB por envio</p>
+      <div id="uploadProgress" style="display:none;margin-top:12px">
+        <div style="background:#E5E7EB;border-radius:6px;height:8px;overflow:hidden">
+          <div id="uploadBar" style="background:var(--navy);height:100%;width:0%;transition:width .3s"></div>
+        </div>
+        <p id="uploadStatus" style="font-size:12px;color:var(--navy);margin-top:6px;font-weight:600"></p>
+      </div>
       <input type="file" id="fileInput" multiple accept=".csv,.xls,.xlsx,.pdf,.ofx" style="display:none">
     </div>
   </div>
@@ -251,7 +257,7 @@ select,input[type=text],input[type=number]{font-family:inherit}
 
   <div class="step-footer">
     <span></span>
-    <button class="btn btn-primary" onclick="avancarPara(2)">Próxima: Verificação →</button>
+    <button class="btn btn-primary" id="btnAvancar1" onclick="avancarPara(2)">Próxima: Verificação →</button>
   </div>
 </div>
 
@@ -786,31 +792,84 @@ async function handleUpload() {
   const fd = new FormData();
   for (const f of files) fd.append('files', f);
 
-  showAlert('alert1', 'Enviando arquivos...', 'info');
-  const r = await fetch('/api/upload', { method:'POST', body:fd }).then(r=>r.json());
+  const prog = document.getElementById('uploadProgress');
+  const bar  = document.getElementById('uploadBar');
+  const stat = document.getElementById('uploadStatus');
+  const btn  = document.getElementById('btnAvancar1');
+  const zone = document.getElementById('uploadZone');
 
-  const dupl  = (r.rejected||[]).filter(x => x.motivo.includes('idêntico') || x.motivo.includes('mesmo nome'));
-  const erros = (r.rejected||[]).filter(x => !x.motivo.includes('idêntico') && !x.motivo.includes('mesmo nome'));
+  S.uploading = true;
+  prog.style.display = 'block';
+  bar.style.width = '0%';
+  stat.textContent = `Enviando ${files.length} arquivo(s)...`;
+  btn.disabled = true;
+  btn.style.opacity = '.4';
+  zone.style.pointerEvents = 'none';
+  showAlert('alert1', '', '');
 
-  if (r.uploaded && r.uploaded.length) {
-    showAlert('alert1', `${r.uploaded.length} arquivo(s) adicionado(s).`, 'success');
-  }
-  if (dupl.length) {
-    showAlert('alert1',
-      `${dupl.length} duplicata(s) ignorada(s): ${dupl.map(x=>`"${x.filename}" — ${x.motivo}`).join(' | ')}`,
-      'warn');
-  }
-  if (erros.length) {
-    showAlert('alert1',
-      erros.map(x=>`${x.filename}: ${x.motivo}`).join(' | '),
-      'error');
-  }
-  if (!r.uploaded?.length && !dupl.length && !erros.length) {
-    showAlert('alert1', 'Nenhum arquivo processado.', 'warn');
+  try {
+    const xhr = new XMLHttpRequest();
+    const result = await new Promise((resolve, reject) => {
+      xhr.upload.onprogress = (e) => {
+        if (e.lengthComputable) {
+          const pct = Math.round(e.loaded / e.total * 100);
+          bar.style.width = pct + '%';
+          stat.textContent = `Enviando... ${pct}%`;
+        }
+      };
+      xhr.onload = () => {
+        try { resolve(JSON.parse(xhr.responseText)); }
+        catch { reject(new Error('Resposta inválida')); }
+      };
+      xhr.onerror = () => reject(new Error('Falha de rede'));
+      xhr.open('POST', '/api/upload');
+      xhr.send(fd);
+    });
+
+    bar.style.width = '100%';
+    stat.textContent = 'Processando resposta...';
+
+    const r = result;
+    const dupl  = (r.rejected||[]).filter(x => x.motivo.includes('idêntico') || x.motivo.includes('mesmo nome'));
+    const erros = (r.rejected||[]).filter(x => !x.motivo.includes('idêntico') && !x.motivo.includes('mesmo nome'));
+
+    if (r.uploaded && r.uploaded.length) {
+      stat.textContent = `✓ ${r.uploaded.length} arquivo(s) adicionado(s) com sucesso`;
+      stat.style.color = 'var(--green)';
+      showAlert('alert1', `${r.uploaded.length} arquivo(s) adicionado(s).`, 'success');
+    }
+    if (dupl.length) {
+      showAlert('alert1',
+        `${dupl.length} duplicata(s) ignorada(s): ${dupl.map(x=>`"${x.filename}" — ${x.motivo}`).join(' | ')}`,
+        'warn');
+    }
+    if (erros.length) {
+      showAlert('alert1',
+        erros.map(x=>`${x.filename}: ${x.motivo}`).join(' | '),
+        'error');
+    }
+    if (!r.uploaded?.length && !dupl.length && !erros.length) {
+      stat.textContent = 'Nenhum arquivo processado';
+      stat.style.color = 'var(--amber)';
+      showAlert('alert1', 'Nenhum arquivo processado.', 'warn');
+    }
+  } catch (err) {
+    stat.textContent = '✗ Erro no envio';
+    stat.style.color = 'red';
+    showAlert('alert1', `Erro: ${err.message}`, 'error');
   }
 
+  S.uploading = false;
+  btn.disabled = false;
+  btn.style.opacity = '1';
+  zone.style.pointerEvents = '';
   document.getElementById('fileInput').value = '';
   loadArquivos();
+
+  setTimeout(() => {
+    prog.style.display = 'none';
+    stat.style.color = '';
+  }, 4000);
 }
 
 async function loadArquivos() {

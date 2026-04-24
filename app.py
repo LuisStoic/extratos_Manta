@@ -304,47 +304,101 @@ def inv_mapa(schema_map: dict) -> dict:
 def parse_valor(v) -> float | None:
     """
     Converte valor monetário (string ou número) para float.
-    Lida com formatos BR: vírgula decimal, ponto milhar, R$,
-    sinal negativo à direita (BRB: '84.000,00-').
-    Retorna None para nan, vazio ou não-parseável.
+
+    Regra de separador: o ÚLTIMO símbolo ',' ou '.' na string é o
+    separador decimal; os anteriores (do mesmo tipo ou diferentes) são
+    separadores de milhar. Aceita formato BR ('1.500,00'), US/canônico
+    ('1,500.00') e variações misturadas ('1.500.000,00', '1,500,000.00').
+
+    Sinais aceitos:
+      - prefixo '+' ou '-':  "-1.500,00"
+      - sufixo '-' (BRB):    "84.000,00-"
+      - parênteses contábeis: "(1.500,00)" → -1500.0
+
+    Retorna None para NaN, vazio, None ou string não-parseável.
     """
-    if v is None: return None
+    if v is None:
+        return None
     s = str(v).strip()
-    if s.lower() in ('nan', 'nat', 'none', ''): return None
+    if not s or s.lower() in ('nan', 'nat', 'none'):
+        return None
+
+    # Convenção contábil: (1.500,00) → -1500.00
+    sinal = 1
+    if s.startswith('(') and s.endswith(')'):
+        sinal = -1
+        s = s[1:-1].strip()
     s = re.sub(r'[R$\s\u00a0\xa0]', '', s)
 
     # Sinal negativo posterior (BRB): "84.000,00-"
-    sinal = -1.0 if s.endswith('-') else 1.0
-    s = s.rstrip('-').lstrip('+')
+    if s.endswith('-'):
+        sinal = -sinal
+        s = s.rstrip('-')
 
-    # Formato BR ('.' milhar, ',' decimal) vs US/canônico ('.' decimal)
-    if ',' in s and '.' in s:
-        s = s.replace('.', '').replace(',', '.')
-    elif ',' in s:
-        s = s.replace(',', '.')
-    try:
-        return float(s) * sinal
-    except:
+    # Sinal explícito no início
+    if s.startswith('-'):
+        sinal = -sinal
+        s = s[1:]
+    elif s.startswith('+'):
+        s = s[1:]
+
+    if not s:
         return None
 
-def parse_data(v) -> str | None:
+    # Último ',' ou '.' é decimal; os anteriores são milhar.
+    last_comma = s.rfind(',')
+    last_dot   = s.rfind('.')
+    if last_comma > last_dot:
+        s = s.replace('.', '').replace(',', '.')
+    elif last_dot > last_comma:
+        s = s.replace(',', '')
+    # else: nenhum separador — inteiro puro
+
+    try:
+        return float(s) * sinal
+    except ValueError:
+        return None
+
+def parse_data(v, preservar_raw: bool = False):
     """
     Converte data em múltiplos formatos para ISO YYYY-MM-DD.
-    Retorna string original se nenhum formato reconhecido funcionar
-    (preserva o dado mas pode causar issue 'data_ausente' downstream).
+
+    Retorna None quando:
+      - entrada é vazia/None/NaN/NaT
+      - nenhum formato reconhecido funciona
+      - data é calendaricamente inválida (ex: '00/00/0000', '31/02/2026')
+
+    Se preservar_raw=True, retorna tupla (iso_ou_None, string_original).
+    Isso permite distinguir 'data_ausente' (raw vazio) de 'data_invalida'
+    (raw preenchido mas não parseável) no classificador.
     """
-    if v is None: return None
+    raw = '' if v is None else str(v).strip()
+
+    def _ret(valid):
+        return (valid, raw) if preservar_raw else valid
+
+    if v is None:
+        return _ret(None)
+
     if isinstance(v, (pd.Timestamp, datetime)):
-        return v.strftime('%Y-%m-%d')
-    s = str(v).strip()
-    if s.lower() in ('nan', 'nat', 'none', 'nd', ''): return None
+        try:
+            if pd.isna(v):
+                return _ret(None)
+            return _ret(v.strftime('%Y-%m-%d'))
+        except (ValueError, AttributeError):
+            return _ret(None)
+
+    s = raw
+    if not s or s.lower() in ('nan', 'nat', 'none', 'nd'):
+        return _ret(None)
+
     for fmt in ['%d/%m/%Y', '%Y-%m-%d', '%d-%m-%Y', '%d.%m.%Y',
                 '%Y%m%d', '%d/%m/%y', '%m/%d/%Y']:
         try:
-            return datetime.strptime(s[:10], fmt).strftime('%Y-%m-%d')
-        except:
+            return _ret(datetime.strptime(s[:10], fmt).strftime('%Y-%m-%d'))
+        except ValueError:
             pass
-    return s
+    return _ret(None)
 
 
 # ============================================================
@@ -412,22 +466,26 @@ def classificar(row_norm: dict, unit_conf: int, unit_confirmada: bool) -> tuple[
     Classifica lançamento em Grupo A (confiável) ou B (revisão humana).
 
     Critérios para Grupo B (qualquer um):
-      - data_ausente:      Data None ou não parseável
+      - data_ausente:      Data None E Data_Raw vazio (campo fonte vazio)
+      - data_invalida:     Data None E Data_Raw preenchido (parse falhou)
       - valor_ausente:     Valor None após todos os fallbacks
       - descricao_ausente: Descrição vazia após todos os fallbacks
       - tipo_indefinido:   Nenhuma estratégia de tipo funcionou
       - unidade_incerta:   Não confirmada manualmente E fuzzy < 80%
 
+    data_ausente e data_invalida são mutuamente exclusivos.
+
     Confiabilidade:
       ALTA  → Grupo A
       MÉDIA → Grupo B com apenas tipo_indefinido
-      BAIXA → Grupo B com campo obrigatório ausente
+      BAIXA → Grupo B com campo obrigatório ausente (inclui data_invalida)
 
     Returns: (grupo, confiabilidade, issues)
     """
     issues = []
-    if not row_norm.get('Data'):
-        issues.append('data_ausente')
+    if row_norm.get('Data') is None:
+        data_raw = str(row_norm.get('Data_Raw', '') or '').strip()
+        issues.append('data_invalida' if data_raw else 'data_ausente')
     if row_norm.get('Valor') is None:
         issues.append('valor_ausente')
     if not str(row_norm.get('Descricao', '')).strip():
@@ -1056,8 +1114,14 @@ def processar():
                               if p and p.lower() not in ('nan','none','desconhecido','')]
                     if partes: descricao_raw = ' | '.join(partes)
 
+                if inv.get('Data'):
+                    data_iso, data_raw = parse_data(rd.get(inv['Data']), preservar_raw=True)
+                else:
+                    data_iso, data_raw = None, ''
+
                 row_norm = {
-                    'Data':         parse_data(rd.get(inv['Data'])) if inv.get('Data') else None,
+                    'Data':         data_iso,
+                    'Data_Raw':     data_raw,
                     'Valor':        valor_abs,
                     'Tipo':         tipo,
                     'Descricao':    descricao_raw,
@@ -1348,7 +1412,7 @@ DICT_COLUNAS = [
 ]
 
 COL_WIDTHS = {
-    'Data':18,'Valor':14,'Tipo':12,'Descricao':38,'Conta':16,'Banco':28,
+    'Data':18,'Data_Raw':18,'Valor':14,'Tipo':12,'Descricao':38,'Conta':16,'Banco':28,
     'CNPJ':20,'Centro_Custo':18,'Marca':14,'Unidade':20,'Arquivo':38,
     'Grupo':10,'Confiabilidade':16,'Status':14,'Issues':40,'ID':42,
 }
@@ -1371,7 +1435,14 @@ def _build_excel(ls: list, depara_cfg: dict, sumario_rows: list) -> io.BytesIO:
     wb = Workbook()
     wb.remove(wb.active)
 
-    COLS_ORIGEM_BASE = ['Data','Valor','Tipo','Descricao','Conta','Banco','CNPJ','Centro_Custo']
+    # Só expõe Data_Raw se houver data_invalida em algum lançamento —
+    # caso contrário a coluna fica sempre vazia e só polui a planilha.
+    has_data_invalida = any('data_invalida' in l.get('issues', []) for l in ls)
+    COLS_ORIGEM_BASE = (
+        ['Data','Data_Raw','Valor','Tipo','Descricao','Conta','Banco','CNPJ','Centro_Custo']
+        if has_data_invalida else
+        ['Data','Valor','Tipo','Descricao','Conta','Banco','CNPJ','Centro_Custo']
+    )
     COLS_PROC        = ['Marca','Unidade','Arquivo','Grupo','Confiabilidade','Status','Issues','ID']
 
     extra_keys_all = {}

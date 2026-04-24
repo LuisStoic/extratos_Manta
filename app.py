@@ -56,6 +56,9 @@ from datetime import datetime
 import io
 from ofxparse import OfxParser
 
+from detectores_banco import detectar_cabecalho
+from resolucao_conta  import resolver_conta, validar_cruzado
+
 # ============================================================
 # CONFIGURAÇÃO FLASK
 # ============================================================
@@ -197,17 +200,60 @@ def load_config() -> dict:
     Carrega configurações do config.json.
     Retorna defaults se o arquivo não existir ou estiver corrompido.
     Garante backward compatibility adicionando chaves ausentes.
+
+    Migração v9: 'contas_bancarias' é criada como [] se ausente.
+    fn_patterns é mantida intacta por compat com fluxo v8 em modo_legado,
+    mas registra aviso em NOTAS_REFATORACAO.md na primeira carga onde
+    contas_bancarias está vazia e fn_patterns tem entradas.
     """
     if CONFIG_PATH.exists():
         try:
             c = json.loads(CONFIG_PATH.read_text('utf-8'))
-            if 'unidades'    not in c: c['unidades']    = DEFAULT_UNIDADES
-            if 'depara'      not in c: c['depara']      = {}
-            if 'fn_patterns' not in c: c['fn_patterns'] = {}
+            if 'unidades'         not in c: c['unidades']         = DEFAULT_UNIDADES
+            if 'depara'           not in c: c['depara']           = {}
+            if 'fn_patterns'      not in c: c['fn_patterns']      = {}
+            if 'contas_bancarias' not in c:
+                c['contas_bancarias'] = []
+                _aviso_migracao_v9(c)
             return c
         except Exception as e:
             print(f"[CONFIG] Erro ao carregar: {e}")
-    return {'unidades': DEFAULT_UNIDADES, 'depara': {}, 'fn_patterns': {}}
+    return {'unidades': DEFAULT_UNIDADES, 'depara': {}, 'fn_patterns': {},
+            'contas_bancarias': []}
+
+
+def _aviso_migracao_v9(cfg: dict) -> None:
+    """Anexa aviso em NOTAS_REFATORACAO.md quando config v8 é lida.
+
+    Chamado uma única vez no upgrade. Silencioso se o arquivo de notas
+    não existir (ambiente não-dev).
+    """
+    if not cfg.get('fn_patterns'):
+        return
+    notas = Path(__file__).parent / 'NOTAS_REFATORACAO.md'
+    if not notas.exists():
+        return
+    stamp = datetime.now().strftime('%Y-%m-%d')
+    marcador = '## Migração v8 → v9 detectada'
+    try:
+        conteudo_atual = notas.read_text('utf-8')
+        if marcador in conteudo_atual:
+            return
+        bloco = (
+            f"\n\n---\n\n{marcador} ({stamp})\n\n"
+            f"- `config.json` foi carregada pela primeira vez com "
+            f"`contas_bancarias` vazia e `fn_patterns` populada ({len(cfg['fn_patterns'])} entradas).\n"
+            f"- `fn_patterns` são legado v8 e devem ser substituídos por "
+            f"`contas_bancarias`. Enquanto não houver contas cadastradas, "
+            f"o sistema opera em **modo_legado** (Rastreab=BAIXA em tudo).\n"
+            f"- Entradas atuais de fn_patterns (para migração manual):\n"
+            + '\n'.join(f"  - `{k}` → unit_id `{v}`"
+                        for k, v in cfg['fn_patterns'].items())
+            + "\n"
+        )
+        notas.write_text(conteudo_atual + bloco, 'utf-8')
+    except Exception as e:
+        print(f"[MIGRACAO_V9] Aviso não pôde ser registrado: {e}")
 
 def save_config(cfg: dict) -> None:
     """Persiste configuração em config.json (UTF-8, indentado)."""
@@ -230,9 +276,17 @@ SESSION = {
     'lancamentos':     [],    # [{id, arquivo, Data, Valor, Tipo, ...}]
     'schema_map':      {},    # {col_original: anchor} da última execução
     'processado':      False,
-    'doc_verificados': {},    # {filename: unit_id} — confirmações manuais
+    'doc_verificados': {},    # {filename: unit_id} — confirmações manuais (legado v8)
     'previews':        {},    # {filename: dict} — cache de sumários
     'progresso':       {'pct': 0, 'msg': '', 'ativo': False},
+
+    # v9: identificação e controle de conta bancária por arquivo.
+    'deteccao_cab':         {},  # {filename: dict do detectar_cabecalho}
+    'cruzamento':           {},  # {filename: dict do validar_cruzado}
+    'conta_por_arquivo':    {},  # {filename: conta_id} — resoluções manuais
+    'conta_por_arquivo_meta': {},  # {filename: {metodo_original, escolha_humana, motivo, timestamp}}
+    'arquivos_bloqueados':  [],  # lista de filenames bloqueados no último processar()
+    'audit_log':            [],  # [{ts, filename, acao, detalhes}]
 }
 
 
@@ -916,13 +970,14 @@ def pdf_warnings():
 
 @app.route('/api/remover-arquivo/<filename>', methods=['DELETE'])
 def remover_arquivo(filename):
-    """Remove arquivo da sessão e do disco. Limpa preview e verificação associados."""
+    """Remove arquivo da sessão e do disco. Limpa estados associados."""
     fp = UPLOAD_FOLDER / filename
     try: fp.unlink(missing_ok=True)
     except: pass
-    SESSION['arquivos']        = [a for a in SESSION['arquivos']   if a['filename'] != filename]
-    SESSION['previews'].pop(filename, None)
-    SESSION['doc_verificados'].pop(filename, None)
+    SESSION['arquivos'] = [a for a in SESSION['arquivos'] if a['filename'] != filename]
+    for chave in ('previews', 'doc_verificados', 'deteccao_cab', 'cruzamento',
+                  'conta_por_arquivo', 'conta_por_arquivo_meta'):
+        SESSION[chave].pop(filename, None)
     return jsonify({'ok': True})
 
 
@@ -946,22 +1001,78 @@ def preview_arquivo(filename):
 
 @app.route('/api/verificar-documentos')
 def verificar_documentos():
-    """Lista arquivos com unidade detectada, confiança e status de verificação."""
+    """Lista arquivos com dupla identificação (cabeçalho × nome do arquivo).
+
+    Para cada arquivo, roda o detector de cabeçalho (se ainda não rodou neste
+    ciclo), o encontrar_unidade (controle secundário) e validar_cruzado.
+    A resposta é estruturada em dois blocos (cabecalho, nome_arquivo) mais
+    o banner de status do cruzamento.
+    """
     documentos = []
+    contas_cfg = CFG.get('contas_bancarias', [])
+
     for arq in SESSION['arquivos']:
-        fn = arq['filename']
-        uid, confianca, metodo = encontrar_unidade(fn)
-        confirmada = SESSION['doc_verificados'].get(fn)
+        fn   = arq['filename']
+        path = arq['path']
+
+        deteccao = SESSION['deteccao_cab'].get(fn)
+        if deteccao is None:
+            deteccao = detectar_cabecalho(path, fn)
+            SESSION['deteccao_cab'][fn] = deteccao
+
+        conta_id_cab, conta_conf, conta_motivo = (
+            resolver_conta(deteccao, contas_cfg) if deteccao else (None, 0, 'sem_cabecalho')
+        )
+        conta_obj = next((c for c in contas_cfg if c['id'] == conta_id_cab), None) if conta_id_cab else None
+
+        uid_nome, conf_nome, metodo_nome = encontrar_unidade(fn)
+        unit_id_nome = uid_nome if conf_nome >= 80 else None
+
+        cruzamento = validar_cruzado(conta_id_cab, unit_id_nome, contas_cfg)
+        SESSION['cruzamento'][fn] = cruzamento
+
+        confirmacao = SESSION['conta_por_arquivo'].get(fn)
+        meta_conf   = SESSION['conta_por_arquivo_meta'].get(fn)
+
         documentos.append({
-            'filename':  fn,
-            'detectada': uid,
-            'confianca': confianca,
-            'metodo':    metodo,
-            'confirmada': confirmada,
-            'status':    'verificado' if (confirmada or confianca >= 80) else 'pendente',
-            'preview':   SESSION['previews'].get(fn, {}),
+            'filename': fn,
+            'preview':  SESSION['previews'].get(fn, {}),
+            'cabecalho': {
+                'banco_detectado': deteccao.get('banco_detectado') if deteccao else None,
+                'banco_codigo':    deteccao.get('banco_codigo')    if deteccao else None,
+                'agencia':         deteccao.get('agencia')         if deteccao else None,
+                'conta':           deteccao.get('conta')           if deteccao else None,
+                'cnpj_titular':    deteccao.get('cnpj_titular')    if deteccao else None,
+                'conta_id_resolvida':  conta_id_cab,
+                'conta_desc_resolvida': (
+                    f"{conta_obj['banco_nome']} — ag {conta_obj.get('agencia') or '-'} / "
+                    f"conta {conta_obj.get('conta') or '-'}"
+                ) if conta_obj else None,
+                'unit_id_resolvida':   conta_obj.get('unit_id') if conta_obj else None,
+                'conta_confianca':     conta_conf,
+                'conta_motivo':        conta_motivo,
+            },
+            'nome_arquivo': {
+                'unit_id_sugerido': uid_nome,
+                'confianca':        conf_nome,
+                'metodo':           metodo_nome,
+            },
+            'cruzamento':      cruzamento,
+            'confirmacao':     confirmacao,
+            'confirmacao_meta': meta_conf,
+            # Legado v8 — conservado para não quebrar UI atual enquanto migra.
+            'detectada':  uid_nome,
+            'confianca':  conf_nome,
+            'metodo':     metodo_nome,
+            'confirmada': SESSION['doc_verificados'].get(fn),
+            'status': (
+                'verificado' if cruzamento['status'] in ('concordam', 'apenas_cabecalho')
+                              or confirmacao or cruzamento['status'] == 'modo_legado'
+                else 'pendente'
+            ),
         })
-    return jsonify({'documentos': documentos})
+    return jsonify({'documentos': documentos,
+                    'modo_legado': not CFG.get('contas_bancarias')})
 
 @app.route('/api/confirmar-unidade', methods=['POST'])
 def confirmar_unidade():
@@ -981,6 +1092,87 @@ def confirmar_unidade():
     CFG['fn_patterns'][stem] = uid
     save_config(CFG)
     return jsonify({'ok': True})
+
+
+# ============================================================
+# HELPERS v9 — DECISÃO DE ATRIBUIÇÃO CONTA / UNIDADE
+# ============================================================
+
+def _unit_id_from_conta(conta_id: str | None) -> str | None:
+    if not conta_id:
+        return None
+    for c in CFG.get('contas_bancarias', []):
+        if c.get('id') == conta_id:
+            return c.get('unit_id')
+    return None
+
+
+def _resolver_atribuicao(fn: str, cruzamento: dict, uid_nome: str | None,
+                          cfg: dict) -> tuple[str | None, str | None, str, str]:
+    """Decide a atribuição final (unit_id, conta_id, rastreab, metodo) para um arquivo.
+
+    Consulta SESSION['conta_por_arquivo'] para casos que exigem decisão humana.
+    Em casos de bloqueio (conflito/apenas_nome/nenhum sem confirmação), registra
+    em SESSION['arquivos_bloqueados'] e devolve (None, None, ...) — o loop de
+    processamento deve pular arquivos nessa situação.
+
+    Retorna: (unit_id, conta_id, confiab_rastreab, metodo_atribuicao)
+    """
+    status           = cruzamento['status']
+    confirmacao      = SESSION['conta_por_arquivo'].get(fn)
+    meta_confirmacao = SESSION['conta_por_arquivo_meta'].get(fn, {})
+
+    # Casos limpos — cabeçalho decide (com ou sem concordância do nome)
+    if status in ('concordam', 'apenas_cabecalho'):
+        return (cruzamento['unit_id'], cruzamento['conta_id'],
+                'ALTA', cruzamento['metodo'])
+
+    # Modo legado — preserva comportamento v8
+    if status == 'modo_legado':
+        uid = SESSION['doc_verificados'].get(fn) or uid_nome
+        return uid, None, 'BAIXA', 'modo_legado'
+
+    # Conflito, apenas_nome, nenhum: requer confirmação humana.
+    if confirmacao:
+        unit_id_final = _unit_id_from_conta(confirmacao)
+        rastreab      = 'MEDIA'
+        metodo        = f"{status}_confirmado_manual:{confirmacao}"
+
+        SESSION['audit_log'].append({
+            'ts':        datetime.now().isoformat(timespec='seconds'),
+            'filename':  fn,
+            'acao':      f'{status}_resolvido_manualmente',
+            'detalhes': {
+                'metodo_original':      cruzamento['metodo'],
+                'conta_cabecalho':      cruzamento.get('conta_id'),
+                'unit_id_cabecalho':    cruzamento.get('unit_id_cabecalho'),
+                'unit_id_nome_arquivo': cruzamento.get('unit_id_nome_arquivo'),
+                'escolha_humana':       confirmacao,
+                'motivo':               meta_confirmacao.get('motivo', ''),
+            },
+        })
+        return unit_id_final, confirmacao, rastreab, metodo
+
+    # Sem confirmação: bloqueia.
+    motivo_msg = {
+        'conflito':    f"Conflito entre cabeçalho ({cruzamento.get('unit_id_cabecalho')}) "
+                       f"e nome do arquivo ({cruzamento.get('unit_id_nome_arquivo')}). "
+                       f"Confirme manualmente antes de processar.",
+        'apenas_nome': f"Nome do arquivo sugere {cruzamento.get('unit_id_nome_arquivo')} "
+                       f"mas o cabeçalho não foi reconhecido. Confirme a conta manualmente.",
+        'nenhum':      "Nem cabeçalho nem nome do arquivo identificam a conta. "
+                       "Cadastre a conta em Configurações e confirme o arquivo.",
+    }.get(status, f'Status não processável: {status}')
+
+    SESSION['arquivos_bloqueados'].append({
+        'filename':              fn,
+        'status':                status,
+        'conta_id_cabecalho':    cruzamento.get('conta_id'),
+        'unit_id_cabecalho':     cruzamento.get('unit_id_cabecalho'),
+        'unit_id_nome_arquivo': cruzamento.get('unit_id_nome_arquivo'),
+        'msg':                   motivo_msg,
+    })
+    return None, None, 'BAIXA', cruzamento['metodo']
 
 
 # ============================================================
@@ -1029,6 +1221,11 @@ def processar():
     todos = []
     total = len(SESSION['arquivos'])
 
+    # v9: estado de detecção e bloqueios por arquivo é reiniciado a cada processar().
+    SESSION['deteccao_cab'] = {}
+    SESSION['cruzamento']   = {}
+    SESSION['arquivos_bloqueados'] = []
+
     erros_arquivos = []
     for idx, arq in enumerate(SESSION['arquivos']):
         fn  = arq['filename']
@@ -1036,11 +1233,39 @@ def processar():
         SESSION['progresso'] = {'pct': pct, 'msg': f'Processando {fn} ({idx+1}/{total})...', 'ativo': True}
 
         try:
-            confirmada_id = SESSION['doc_verificados'].get(fn)
-            uid, confianca = (confirmada_id, 100) if confirmada_id else encontrar_unidade(fn)[:2]
+            # ── v9: Identificação por cabeçalho (fonte primária) ──────────
+            deteccao_cab = detectar_cabecalho(arq['path'], fn)
+            SESSION['deteccao_cab'][fn] = deteccao_cab
+
+            conta_id_cab = None
+            if deteccao_cab:
+                conta_id_cab, _, _ = resolver_conta(deteccao_cab, CFG['contas_bancarias'])
+
+            # ── v9: Controle secundário pelo nome do arquivo (NUNCA decide sozinho) ──
+            uid_nome, conf_nome, _ = encontrar_unidade(fn)
+            unit_id_nome = uid_nome if conf_nome >= 80 else None
+
+            # ── v9: Cruzamento e matriz de decisão ─────────────────────────
+            cruzamento = validar_cruzado(conta_id_cab, unit_id_nome, CFG['contas_bancarias'])
+            SESSION['cruzamento'][fn] = cruzamento
+
+            uid, conta_id_final, rastreab, metodo_atrib = _resolver_atribuicao(
+                fn, cruzamento, uid_nome, CFG
+            )
+
+            # Arquivo bloqueado → não entra em lançamentos.
+            if uid is None and conta_id_final is None and cruzamento['status'] != 'modo_legado':
+                continue
+
             unidade_info = next((u for u in CFG['unidades'] if u['id'] == uid), None) if uid else None
             marca   = unidade_info['marca']        if unidade_info else 'N/D'
             unidade = unidade_info['desc_unidade'] if unidade_info else 'N/D'
+
+            # Em modo_legado, preserva o comportamento v8 de consultar doc_verificados
+            # apenas para o cálculo de confiabilidade da unidade (classificar).
+            unit_conf_para_classificar      = 100 if rastreab != 'BAIXA' else conf_nome
+            unit_confirmada_para_classificar = (rastreab != 'BAIXA' or
+                                                 bool(SESSION['doc_verificados'].get(fn)))
 
             df = ler_df(arq['path'], fn)
             if df.empty: continue
@@ -1131,10 +1356,21 @@ def processar():
                     'Centro_Custo': str(rd.get(inv['Centro_Custo'], '') if inv.get('Centro_Custo') else '').strip(),
                 }
 
-                grupo, conf, issues = classificar(row_norm, confianca, bool(confirmada_id))
+                grupo, conf, issues = classificar(row_norm, unit_conf_para_classificar,
+                                                   unit_confirmada_para_classificar)
+                # v9: anexa issue de rastreabilidade ao lançamento quando aplicável.
+                if cruzamento.get('issue') and cruzamento['issue'] not in issues:
+                    issues.append(cruzamento['issue'])
+                    if grupo == 'A':
+                        grupo = 'B'
+                        conf  = 'BAIXA' if conf == 'ALTA' else conf
+
                 todos.append({
                     'id': f"{fn}::{i}", 'arquivo': fn,
                     'unidade_id': uid or '', 'marca': marca, 'unidade': unidade,
+                    'conta_id': conta_id_final,
+                    'metodo_atribuicao': metodo_atrib,
+                    'Confiab_Rastreabilidade': rastreab,
                     'grupo': grupo, 'confiabilidade': conf, 'issues': issues,
                     'tipo_conf': tipo_conf, 'status': 'pendente',
                     **row_norm, 'extras': extras,
@@ -1154,6 +1390,14 @@ def processar():
     if erros_arquivos:
         resp['erros'] = erros_arquivos
         resp['msg'] = f'{len(erros_arquivos)} arquivo(s) com erro: {", ".join(erros_arquivos)}'
+    if SESSION['arquivos_bloqueados']:
+        resp['bloqueados'] = SESSION['arquivos_bloqueados']
+        nomes = ', '.join(b['filename'] for b in SESSION['arquivos_bloqueados'])
+        resp['msg'] = (
+            f"{len(SESSION['arquivos_bloqueados'])} arquivo(s) bloqueado(s) por "
+            f"conflito/ausência de identificação: {nomes}. "
+            f"Resolva em 'Verificação' antes de reprocessar."
+        )
     return jsonify(resp)
 
 @app.route('/api/progresso')
@@ -1358,11 +1602,43 @@ def gate(step):
         ok = len(SESSION['arquivos']) > 0
         return jsonify({'ok': ok, 'msg': '' if ok else 'Faça upload de pelo menos 1 arquivo'})
     if step == 2:
-        sem = [a['filename'] for a in SESSION['arquivos']
-               if not SESSION['doc_verificados'].get(a['filename'])
-               and encontrar_unidade(a['filename'])[1] < 80]
-        return jsonify({'ok': True, 'pendentes': sem,
-                        'msg': f'{len(sem)} arquivo(s) sem unidade confirmada' if sem else ''})
+        modo_legado = not CFG.get('contas_bancarias')
+        pendentes = []
+        contas_cfg = CFG.get('contas_bancarias', [])
+        for a in SESSION['arquivos']:
+            fn = a['filename']
+            # Garante detecção/cruzamento antes de avaliar.
+            deteccao = SESSION['deteccao_cab'].get(fn)
+            if deteccao is None:
+                deteccao = detectar_cabecalho(a['path'], fn)
+                SESSION['deteccao_cab'][fn] = deteccao
+            conta_id_cab, _, _ = (resolver_conta(deteccao, contas_cfg)
+                                   if deteccao else (None, 0, 'sem_cabecalho'))
+            uid_nome, conf_nome, _ = encontrar_unidade(fn)
+            unit_id_nome = uid_nome if conf_nome >= 80 else None
+            cruz = validar_cruzado(conta_id_cab, unit_id_nome, contas_cfg)
+            SESSION['cruzamento'][fn] = cruz
+
+            liberado = (
+                cruz['status'] in ('concordam', 'apenas_cabecalho') or
+                bool(SESSION['conta_por_arquivo'].get(fn)) or
+                cruz['status'] == 'modo_legado' or
+                # legacy v8: aceita confirmação de unidade pela UI antiga
+                (modo_legado and (SESSION['doc_verificados'].get(fn) or conf_nome >= 80))
+            )
+            if not liberado:
+                pendentes.append({
+                    'filename': fn,
+                    'status':   cruz['status'],
+                    'msg':      cruz.get('issue'),
+                })
+
+        msg = ''
+        if pendentes:
+            msg = (f"{len(pendentes)} arquivo(s) com conta não resolvida — "
+                   f"resolva conflitos ou cadastre contas antes de processar.")
+        return jsonify({'ok': True, 'pendentes': pendentes, 'msg': msg,
+                        'modo_legado': modo_legado})
     if step == 3:
         ok = SESSION['processado'] and len(SESSION['lancamentos']) > 0
         return jsonify({'ok': ok, 'msg': '' if ok else 'Execute o processamento primeiro'})
@@ -1407,14 +1683,18 @@ DICT_COLUNAS = [
     ("Grupo","PROCESSAMENTO","A = todos os campos ok e unidade identificada. B = revisão humana.","A | B"),
     ("Confiabilidade","PROCESSAMENTO","Grau de confiança do processamento automático.","ALTA | MÉDIA | BAIXA"),
     ("Status","PROCESSAMENTO","Estado final após o ciclo de validação.","confirmado | pendente | excluido"),
-    ("Issues","PROCESSAMENTO","Motivos que levaram ao Grupo B. Vazio para Grupo A.","data_ausente | valor_ausente | descricao_ausente | tipo_indefinido | unidade_incerta"),
+    ("Issues","PROCESSAMENTO","Motivos que levaram ao Grupo B. Vazio para Grupo A.","data_ausente | valor_ausente | descricao_ausente | tipo_indefinido | unidade_incerta | data_invalida | conflito_cabecalho_nome_arquivo | conta_nao_identificada"),
     ("ID","PROCESSAMENTO","Identificador único gerado pelo sistema. Formato: arquivo::linha.","Permite rastrear a linha exata no arquivo original."),
+    ("Conta_Id","PROCESSAMENTO","ID da conta bancária resolvida a partir do cabeçalho do arquivo.","Referência para tabela-mãe de contas. Vazio em modo_legado."),
+    ("Metodo_Atribuicao","PROCESSAMENTO","Como a conta/unidade foi atribuída (para auditoria).","cabecalho+arquivo_concordam | cabecalho_sem_confirmacao_nome | conflito_resolvido_manual | apenas_nome_confirmado_manual | modo_legado"),
+    ("Confiab_Rastreabilidade","PROCESSAMENTO","Grau de confiança da atribuição da CONTA (distinta de Confiabilidade do lançamento).","ALTA: cabeçalho identificou sem conflito. MEDIA: resolvido manualmente pelo operador. BAIXA: modo_legado ou não identificado."),
 ]
 
 COL_WIDTHS = {
     'Data':18,'Data_Raw':18,'Valor':14,'Tipo':12,'Descricao':38,'Conta':16,'Banco':28,
     'CNPJ':20,'Centro_Custo':18,'Marca':14,'Unidade':20,'Arquivo':38,
     'Grupo':10,'Confiabilidade':16,'Status':14,'Issues':40,'ID':42,
+    'Conta_Id':18,'Metodo_Atribuicao':34,'Confiab_Rastreabilidade':14,
 }
 
 
@@ -1443,7 +1723,9 @@ def _build_excel(ls: list, depara_cfg: dict, sumario_rows: list) -> io.BytesIO:
         if has_data_invalida else
         ['Data','Valor','Tipo','Descricao','Conta','Banco','CNPJ','Centro_Custo']
     )
-    COLS_PROC        = ['Marca','Unidade','Arquivo','Grupo','Confiabilidade','Status','Issues','ID']
+    COLS_PROC = ['Marca','Unidade','Arquivo','Grupo','Confiabilidade',
+                 'Confiab_Rastreabilidade','Conta_Id','Metodo_Atribuicao',
+                 'Status','Issues','ID']
 
     extra_keys_all = {}
     for l in ls:
@@ -1545,7 +1827,19 @@ def _build_excel(ls: list, depara_cfg: dict, sumario_rows: list) -> io.BytesIO:
 
     # Dados
     KEY_MAP = {'Marca':'marca','Unidade':'unidade','Arquivo':'arquivo',
-               'Grupo':'grupo','Confiabilidade':'confiabilidade','Status':'status','ID':'id'}
+               'Grupo':'grupo','Confiabilidade':'confiabilidade','Status':'status','ID':'id',
+               'Conta_Id':'conta_id','Metodo_Atribuicao':'metodo_atribuicao',
+               'Confiab_Rastreabilidade':'Confiab_Rastreabilidade'}
+    # v9: índice por id para derivar a coluna 'Conta' a partir de contas_bancarias.
+    contas_idx = {c['id']: c for c in CFG.get('contas_bancarias', [])}
+
+    def _val_conta_origem(lanc):
+        cid = lanc.get('conta_id')
+        if cid and cid in contas_idx:
+            c = contas_idx[cid]
+            return c.get('conta') or lanc.get('Conta', '')
+        return lanc.get('Conta', '')
+
     for ri,l in enumerate(ls,start=3):
         for ci,cd in enumerate(cols_data,1):
             is_p=cd in COLS_PROC
@@ -1553,6 +1847,8 @@ def _build_excel(ls: list, depara_cfg: dict, sumario_rows: list) -> io.BytesIO:
                 val=(', '.join(l.get('issues',[])) if cd=='Issues' else l.get(KEY_MAP.get(cd,cd),''))
             elif cd in extra_keys:
                 val=l.get('extras',{}).get(cd)
+            elif cd == 'Conta':
+                val = _val_conta_origem(l)
             else:
                 val=l.get(cd)
             c=ws.cell(row=ri,column=ci)
@@ -1641,6 +1937,122 @@ def exportar():
 
 
 # ============================================================
+# ROTAS — CONTAS BANCÁRIAS (CRUD v9)
+# ============================================================
+
+_CAMPOS_CONTA_OBRIGATORIOS  = ('id', 'banco_nome', 'unit_id')
+_CAMPOS_CONTA_OPCIONAIS     = ('banco_codigo', 'agencia', 'conta', 'cnpj_titular',
+                               'ativo_desde', 'ativo_ate', 'observacao')
+
+
+def _validar_conta_payload(d: dict, criar: bool = True) -> tuple[bool, str | None]:
+    if criar:
+        for k in _CAMPOS_CONTA_OBRIGATORIOS:
+            if not d.get(k):
+                return False, f'Campo obrigatório ausente: {k}'
+    if d.get('unit_id') and not any(u['id'] == d['unit_id'] for u in CFG['unidades']):
+        return False, f"unit_id '{d['unit_id']}' não existe em unidades"
+    return True, None
+
+
+@app.route('/api/contas', methods=['GET', 'POST', 'PUT', 'DELETE'])
+def contas_bancarias():
+    """CRUD da tabela-mãe de contas bancárias. Persiste em config.json."""
+    if request.method == 'GET':
+        return jsonify({'contas': CFG.get('contas_bancarias', [])})
+
+    d = request.get_json() or {}
+
+    if request.method == 'POST':
+        ok, msg = _validar_conta_payload(d, criar=True)
+        if not ok:
+            return jsonify({'ok': False, 'msg': msg}), 400
+        if any(c['id'] == d['id'] for c in CFG['contas_bancarias']):
+            return jsonify({'ok': False, 'msg': 'ID já existe'}), 400
+        nova = {
+            'id':            d['id'],
+            'banco_nome':    d['banco_nome'],
+            'banco_codigo':  d.get('banco_codigo'),
+            'agencia':       d.get('agencia'),
+            'conta':         d.get('conta'),
+            'cnpj_titular':  d.get('cnpj_titular'),
+            'unit_id':       d['unit_id'],
+            'ativo_desde':   d.get('ativo_desde'),
+            'ativo_ate':     d.get('ativo_ate'),
+            'observacao':    d.get('observacao', ''),
+        }
+        CFG['contas_bancarias'].append(nova)
+        save_config(CFG)
+        return jsonify({'ok': True, 'contas': CFG['contas_bancarias']})
+
+    if request.method == 'PUT':
+        if not d.get('id'):
+            return jsonify({'ok': False, 'msg': 'id obrigatório'}), 400
+        ok, msg = _validar_conta_payload(d, criar=False)
+        if not ok:
+            return jsonify({'ok': False, 'msg': msg}), 400
+        for c in CFG['contas_bancarias']:
+            if c['id'] == d['id']:
+                for k in _CAMPOS_CONTA_OPCIONAIS + ('banco_nome', 'unit_id'):
+                    if k in d:
+                        c[k] = d[k]
+                save_config(CFG)
+                return jsonify({'ok': True, 'contas': CFG['contas_bancarias']})
+        return jsonify({'ok': False, 'msg': 'Conta não encontrada'}), 404
+
+    if request.method == 'DELETE':
+        before = len(CFG['contas_bancarias'])
+        CFG['contas_bancarias'] = [c for c in CFG['contas_bancarias'] if c['id'] != d.get('id')]
+        if len(CFG['contas_bancarias']) < before:
+            save_config(CFG)
+            return jsonify({'ok': True})
+        return jsonify({'ok': False, 'msg': 'Conta não encontrada'}), 404
+
+
+@app.route('/api/confirmar-conta', methods=['POST'])
+def confirmar_conta():
+    """Resolve manualmente a atribuição conta↔arquivo.
+
+    Body: { filename, conta_id, motivo }
+    - conta_id=None cancela a confirmação prévia.
+    - motivo é obrigatório quando o cruzamento atual é 'conflito' (escolha
+      que diverge do cabeçalho). Guardado em conta_por_arquivo_meta.
+    """
+    d = request.get_json() or {}
+    fn        = d.get('filename')
+    conta_id  = d.get('conta_id')
+    motivo    = (d.get('motivo') or '').strip()
+
+    if not fn:
+        return jsonify({'ok': False, 'msg': 'filename obrigatório'}), 400
+
+    if conta_id is None or conta_id == '':
+        SESSION['conta_por_arquivo'].pop(fn, None)
+        SESSION['conta_por_arquivo_meta'].pop(fn, None)
+        return jsonify({'ok': True, 'clearedfor': fn})
+
+    conta = next((c for c in CFG['contas_bancarias'] if c['id'] == conta_id), None)
+    if not conta:
+        return jsonify({'ok': False, 'msg': f"conta_id '{conta_id}' não cadastrada"}), 404
+
+    cruz = SESSION.get('cruzamento', {}).get(fn, {})
+    if cruz.get('status') == 'conflito' and not motivo:
+        return jsonify({
+            'ok': False,
+            'msg': 'Conflito cabeçalho×nome exige motivo por auditoria.'
+        }), 400
+
+    SESSION['conta_por_arquivo'][fn] = conta_id
+    SESSION['conta_por_arquivo_meta'][fn] = {
+        'metodo_original': cruz.get('metodo'),
+        'escolha_humana':  conta_id,
+        'motivo':          motivo,
+        'timestamp':       datetime.now().isoformat(timespec='seconds'),
+    }
+    return jsonify({'ok': True, 'conta_id': conta_id})
+
+
+# ============================================================
 # ROTAS — UNIDADES (CRUD)
 # ============================================================
 
@@ -1724,6 +2136,9 @@ def limpar():
         'arquivos': [], 'lancamentos': [], 'schema_map': {},
         'processado': False, 'doc_verificados': {}, 'previews': {},
         'progresso': {'pct': 0, 'msg': '', 'ativo': False},
+        'deteccao_cab': {}, 'cruzamento': {},
+        'conta_por_arquivo': {}, 'conta_por_arquivo_meta': {},
+        'arquivos_bloqueados': [], 'audit_log': [],
     }
     for f in UPLOAD_FOLDER.glob('*'):
         try: f.unlink()

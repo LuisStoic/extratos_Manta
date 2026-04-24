@@ -189,6 +189,27 @@ tr:hover td{background:#FAFBFD}
 .two-col{display:grid;grid-template-columns:1fr 1fr;gap:20px}
 @media(max-width:700px){.two-col{grid-template-columns:1fr}}
 
+/* v9 — Verificação dupla (cabeçalho × nome do arquivo) */
+.verif-card{border:1px solid var(--border);border-radius:6px;margin-bottom:12px;background:#fff;overflow:hidden}
+.verif-banner{padding:9px 14px;font-size:12px;font-weight:600;display:flex;align-items:center;gap:8px;border-bottom:1px solid var(--border)}
+.verif-banner.concordam        {background:#D1FAE5;color:#065F46}
+.verif-banner.apenas_cabecalho {background:#DBEAFE;color:#1E3A5F}
+.verif-banner.apenas_nome      {background:#FEF3C7;color:#78350F}
+.verif-banner.conflito         {background:#FEE2E2;color:#7F1D1D}
+.verif-banner.nenhum           {background:#FEE2E2;color:#7F1D1D}
+.verif-banner.modo_legado      {background:#F3F4F6;color:#374151}
+.verif-body{display:grid;grid-template-columns:1.1fr 1fr auto;gap:0;align-items:stretch}
+.verif-col{padding:12px 14px;border-right:1px solid var(--border);min-width:0}
+.verif-col:last-child{border-right:none}
+.verif-col-title{font-size:10px;font-weight:700;color:var(--muted);text-transform:uppercase;letter-spacing:.05em;margin-bottom:6px}
+.verif-col-main{font-size:13px;font-weight:600;color:var(--navy);margin-bottom:4px;word-break:break-word}
+.verif-col-sub{font-size:11px;color:var(--muted);line-height:1.5}
+.verif-col-nd{color:#7F1D1D;font-weight:700}
+.verif-actions{padding:12px;display:flex;flex-direction:column;gap:6px;justify-content:center;background:#FAFBFD;min-width:180px}
+.verif-conflito-options{padding:12px 14px;background:#FFFBEB;border-top:1px solid var(--border);display:flex;gap:8px;align-items:center;flex-wrap:wrap;font-size:12px}
+.verif-conflito-options input[type=text]{padding:5px 8px;border:1px solid var(--border);border-radius:3px;font-size:12px;flex:1;min-width:180px}
+@media(max-width:860px){.verif-body{grid-template-columns:1fr}.verif-col{border-right:none;border-bottom:1px solid var(--border)}}
+
 select,input[type=text],input[type=number]{font-family:inherit}
 </style>
 </head>
@@ -265,27 +286,18 @@ select,input[type=text],input[type=number]{font-family:inherit}
 <div id="tab2" class="tab-content">
   <div id="alert2" class="alert"></div>
   <div class="card">
-    <div class="info-block">
-      Para cada arquivo, confirme a qual unidade ele pertence. A detecção automática usa o nome do arquivo
-      com fuzzy matching — confirme ou corrija antes de processar.
+    <div class="info-block" id="verifInfoBlock">
+      <strong>Identificação cruzada (v9):</strong> para cada arquivo, o sistema compara
+      o que foi identificado no <strong>cabeçalho do arquivo</strong> (fonte primária)
+      com a <strong>sugestão pelo nome do arquivo</strong> (controle secundário).
+      Conflitos bloqueiam o processamento até você decidir.
     </div>
-    <div id="tabelaVerificacaoWrap">
-      <div class="table-wrap">
-        <table>
-          <thead>
-            <tr>
-              <th>Arquivo</th>
-              <th>Unidade detectada</th>
-              <th>Confiança</th>
-              <th>Confirmar unidade</th>
-              <th style="text-align:center">Status</th>
-              <th style="text-align:center">Preview</th>
-            </tr>
-          </thead>
-          <tbody id="bodyVerificacao"></tbody>
-        </table>
-      </div>
+    <div class="warn-block" id="verifModoLegado" style="display:none">
+      <strong>Modo legado v8 ativo</strong> — nenhuma conta bancária cadastrada.
+      A atribuição continua baseada no nome do arquivo (Rastreab=BAIXA). Cadastre
+      contas em <em>⚙ Configurações → Contas</em> para ativar o fluxo v9.
     </div>
+    <div id="verificacaoList"></div>
     <div id="verificacaoVazia" class="empty-state" style="display:none">
       <div class="empty-state-icon">📂</div>
       <div class="empty-state-title">Nenhum arquivo carregado</div>
@@ -610,6 +622,7 @@ select,input[type=text],input[type=number]{font-family:inherit}
     </div>
     <div class="group-tab-nav" style="margin-bottom:20px">
       <button class="group-tab-btn active" onclick="switchConfigTab('unidades',this)">Unidades</button>
+      <button class="group-tab-btn" onclick="switchConfigTab('contas',this)">Contas Bancárias</button>
       <button class="group-tab-btn" onclick="switchConfigTab('depara',this)">De-Para de Colunas</button>
     </div>
 
@@ -635,6 +648,39 @@ select,input[type=text],input[type=number]{font-family:inherit}
         <table><thead><tr><th>ID</th><th>Marca</th><th>Descrição</th><th style="text-align:center">Ação</th></tr></thead>
         <tbody id="bodyUnidades"></tbody></table>
       </div>
+    </div>
+
+    <!-- Contas Bancárias (v9) -->
+    <div id="configPanelContas" style="display:none">
+      <div class="info-block" style="margin-bottom:12px">
+        <strong>Tabela-mãe de contas bancárias.</strong> Cada conta liga cabeçalho
+        (banco_codigo + agência + conta + CNPJ) a uma <em>unit_id</em>.
+        O cabeçalho do arquivo é a fonte primária de identificação — o nome do
+        arquivo serve apenas como controle secundário.
+      </div>
+      <div style="display:grid;grid-template-columns:1fr 1fr 1fr 1fr;gap:8px;margin-bottom:10px;align-items:end;padding:12px;background:var(--bg);border-radius:4px;border:1px solid var(--border)">
+        <div class="form-group" style="margin:0"><label class="form-label">ID</label><input type="text" id="cta-id" class="form-input" placeholder="STONE_ASTCU"></div>
+        <div class="form-group" style="margin:0"><label class="form-label">Banco nome</label><input type="text" id="cta-banco" class="form-input" placeholder="Stone"></div>
+        <div class="form-group" style="margin:0"><label class="form-label">Cód banco</label><input type="text" id="cta-bcod" class="form-input" placeholder="197"></div>
+        <div class="form-group" style="margin:0"><label class="form-label">Agência</label><input type="text" id="cta-ag" class="form-input" placeholder="0001"></div>
+        <div class="form-group" style="margin:0"><label class="form-label">Conta</label><input type="text" id="cta-conta" class="form-input" placeholder="1234567"></div>
+        <div class="form-group" style="margin:0"><label class="form-label">CNPJ titular</label><input type="text" id="cta-cnpj" class="form-input" placeholder="00.000.000/0001-00"></div>
+        <div class="form-group" style="margin:0"><label class="form-label">Unidade</label><select id="cta-unit" class="form-select"></select></div>
+        <button class="btn btn-primary" onclick="adicionarConta()">+ Adicionar</button>
+      </div>
+      <div id="alertContas" class="alert"></div>
+      <div class="table-wrap">
+        <table>
+          <thead><tr>
+            <th>ID</th><th>Banco</th><th>Ag/Conta</th><th>CNPJ</th>
+            <th>Unidade</th><th style="text-align:center">Ação</th>
+          </tr></thead>
+          <tbody id="bodyContas"></tbody>
+        </table>
+      </div>
+      <p id="emptyContas" style="text-align:center;padding:24px;color:var(--muted);display:none">
+        Nenhuma conta cadastrada. Enquanto a tabela estiver vazia, o sistema roda em modo_legado.
+      </p>
     </div>
 
     <!-- De-Para -->
@@ -917,72 +963,174 @@ async function removerArquivo(fn) {
   loadArquivos();
 }
 
-// ========== TAB 2: VERIFICAÇÃO ==========
+// ========== TAB 2: VERIFICAÇÃO (v9 dupla identificação) ==========
+S.contas = [];
+
+async function loadContasCache() {
+  const r = await api('/api/contas');
+  S.contas = r.contas || [];
+}
+
 async function loadVerificacao() {
+  await loadContasCache();
   const r = await api('/api/verificar-documentos');
   const docs = r.documentos || [];
   const vazia = document.getElementById('verificacaoVazia');
-  const wrap = document.getElementById('tabelaVerificacaoWrap');
+  const lista = document.getElementById('verificacaoList');
+  const legadoBlock = document.getElementById('verifModoLegado');
 
-  if (!docs.length) { vazia.style.display='block'; wrap.style.display='none'; return; }
-  vazia.style.display='none'; wrap.style.display='block';
+  legadoBlock.style.display = r.modo_legado ? 'block' : 'none';
 
-  const opcoes = S.unidades.map(u =>
-    `<option value="${u.id}">${u.id} — ${u.marca} | ${u.desc_unidade}</option>`
-  ).join('');
+  if (!docs.length) {
+    vazia.style.display='block'; lista.innerHTML=''; return;
+  }
+  vazia.style.display='none';
 
-  document.getElementById('bodyVerificacao').innerHTML = docs.map(doc => {
-    const sel = doc.confirmada || doc.detectada || '';
-    const corConf = doc.confianca >= 80 ? '#27AE60' : doc.confianca >= 60 ? '#F5A623' : '#E53E3E';
-    const isVerif = doc.confirmada || doc.confianca >= 80;
-    const prev = doc.preview;
-    const prevHtml = prev && prev.ok
-      ? `<span style="font-size:11px;color:var(--muted)">${prev.rows} lin | E: ${fmtMoeda(prev.sum_entrada)} | S: ${fmtMoeda(prev.sum_saida)}</span>`
-      : `<button class="btn btn-ghost btn-sm" onclick="loadPreviewVerif('${esc(doc.filename)}')">Carregar</button>`;
-    return `
-      <tr id="vrow-${esc(doc.filename)}">
-        <td style="max-width:200px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-weight:600" title="${doc.filename}">${doc.filename}</td>
-        <td>${doc.detectada ? `<span class="badge badge-cinza">${doc.detectada}</span>` : '<span style="color:var(--muted)">—</span>'}</td>
-        <td>
-          <div style="display:flex;align-items:center;gap:6px">
-            <div class="conf-bar-wrap"><div class="conf-bar-fill" style="width:${doc.confianca}%;background:${corConf}">${doc.confianca}%</div></div>
-            <span style="font-size:11px;color:var(--muted)">${doc.metodo}</span>
-          </div>
-        </td>
-        <td>
-          <select style="width:100%;padding:6px 8px;border:1px solid var(--border);border-radius:4px;font-size:12px"
-                  onchange="confirmarUnidade('${esc(doc.filename)}',this.value)">
-            <option value="">-- Selecione --</option>
-            ${S.unidades.map(u => `<option value="${u.id}" ${sel===u.id?'selected':''}>${u.id} — ${u.desc_unidade}</option>`).join('')}
-          </select>
-        </td>
-        <td style="text-align:center">
-          <span class="badge ${isVerif?'badge-verde':'badge-amarelo'}" id="vstatus-${esc(doc.filename)}">
-            ${isVerif ? '✓ Verif.' : '⚠ Pend.'}
-          </span>
-        </td>
-        <td style="text-align:center" id="vprev-${esc(doc.filename)}">${prevHtml}</td>
-      </tr>`;
-  }).join('');
+  lista.innerHTML = docs.map(doc => renderVerifCard(doc, r.modo_legado)).join('');
+}
+
+function bannerMsg(cruz, modoLegado) {
+  const s = cruz.status;
+  if (modoLegado) return '⚙ Modo legado — atribuição pelo nome do arquivo, Rastreab=BAIXA';
+  if (s === 'concordam')        return '✓ Cabeçalho e nome do arquivo concordam';
+  if (s === 'apenas_cabecalho') return 'ℹ Identificado pelo cabeçalho (nome do arquivo sem sugestão)';
+  if (s === 'apenas_nome')      return '⚠ Apenas nome do arquivo sugere — cabeçalho não reconhecido. Confirme manualmente.';
+  if (s === 'conflito')         return `⚠ CONFLITO: cabeçalho → ${cruz.unit_id_cabecalho || '?'}, nome → ${cruz.unit_id_nome_arquivo || '?'}. Decida qual usar.`;
+  if (s === 'nenhum')           return '⚠ Nem cabeçalho nem nome identificam a conta. Cadastre a conta.';
+  return s;
+}
+
+function renderVerifCard(doc, modoLegado) {
+  const cab = doc.cabecalho || {};
+  const nom = doc.nome_arquivo || {};
+  const cruz = doc.cruzamento || {};
+  const fn = doc.filename;
+
+  const cabBlocoMain = cab.banco_detectado
+    ? `<div class="verif-col-main">${cab.banco_detectado}${cab.banco_codigo ? ' (' + cab.banco_codigo + ')' : ''}</div>`
+    : `<div class="verif-col-main verif-col-nd">NÃO DETECTADO</div>`;
+  const cabBlocoSub = cab.banco_detectado
+    ? `<div class="verif-col-sub">
+         ${cab.agencia ? 'Ag: '+cab.agencia : ''}${cab.agencia && cab.conta ? ' · ' : ''}${cab.conta ? 'Conta: '+cab.conta : ''}<br>
+         ${cab.cnpj_titular ? 'CNPJ: '+cab.cnpj_titular : ''}<br>
+         Resolvido: ${cab.conta_id_resolvida
+           ? `<strong>${cab.conta_id_resolvida}</strong> — ${cab.conta_desc_resolvida || ''}`
+           : `<span class="verif-col-nd">NÃO CADASTRADA</span>`}
+       </div>`
+    : `<div class="verif-col-sub">Sem identificação de banco no cabeçalho.</div>`;
+
+  const nomMain = nom.unit_id_sugerido
+    ? `<div class="verif-col-main">${nom.unit_id_sugerido}</div>
+       <div class="verif-col-sub">${nom.confianca}% · método: ${nom.metodo}</div>`
+    : `<div class="verif-col-main" style="color:var(--muted)">Sem sugestão</div>
+       <div class="verif-col-sub">Nome do arquivo não casou com unidades cadastradas.</div>`;
+
+  const prev = doc.preview;
+  const prevHtml = prev && prev.ok
+    ? `<div class="verif-col-sub" style="margin-top:4px">📊 ${prev.rows} linhas · E: ${fmtMoeda(prev.sum_entrada)} · S: ${fmtMoeda(prev.sum_saida)}</div>`
+    : '';
+
+  let actions = '';
+  let extraBlock = '';
+
+  if (cruz.status === 'conflito') {
+    const idCab = cab.conta_id_resolvida || '';
+    extraBlock = `
+      <div class="verif-conflito-options">
+        <strong>Escolha explícita (default recomendado: cabeçalho).</strong>
+        <button class="btn btn-primary btn-sm" onclick="resolverConflito('${esc(fn)}','${esc(idCab)}','Segui o cabeçalho (recomendado)')">
+          Usar cabeçalho (${idCab || 'sem conta'})
+        </button>
+        <input type="text" id="motivo-${esc(fn)}" placeholder="Motivo para divergir do cabeçalho…">
+        ${renderContaSelect(fn, 'sel-outro-'+esc(fn))}
+        <button class="btn btn-danger btn-sm" onclick="usarOutraConta('${esc(fn)}')">
+          Usar conta divergente
+        </button>
+      </div>`;
+  } else if (cruz.status === 'apenas_nome' || cruz.status === 'nenhum') {
+    extraBlock = `
+      <div class="verif-conflito-options">
+        ${renderContaSelect(fn, 'sel-confirma-'+esc(fn))}
+        <button class="btn btn-primary btn-sm" onclick="confirmarContaManual('${esc(fn)}')">
+          Confirmar conta
+        </button>
+      </div>`;
+  }
+
+  const confirmada = doc.confirmacao
+    ? `<div style="font-size:11px;color:#065F46;margin-top:4px">✓ Confirmada manualmente: ${doc.confirmacao}</div>`
+    : '';
+
+  return `
+    <div class="verif-card" id="vcard-${esc(fn)}">
+      <div class="verif-banner ${modoLegado ? 'modo_legado' : cruz.status}">
+        ${bannerMsg(cruz, modoLegado)}
+      </div>
+      <div class="verif-body">
+        <div class="verif-col">
+          <div class="verif-col-title">📄 ${fn}</div>
+          <div class="verif-col-title" style="margin-top:6px">Detectado no cabeçalho</div>
+          ${cabBlocoMain}${cabBlocoSub}
+          ${confirmada}
+          ${prevHtml}
+        </div>
+        <div class="verif-col">
+          <div class="verif-col-title">Sugerido pelo nome do arquivo</div>
+          ${nomMain}
+        </div>
+        <div class="verif-actions">
+          <button class="btn btn-ghost btn-sm" onclick="loadPreviewVerif('${esc(fn)}')">↻ Preview</button>
+          <button class="btn btn-danger btn-sm" onclick="removerArquivo('${esc(fn)}');loadVerificacao()">✕ Remover</button>
+        </div>
+      </div>
+      ${extraBlock}
+    </div>`;
+}
+
+function renderContaSelect(fn, id) {
+  return `<select id="${id}" style="padding:5px 8px;border:1px solid var(--border);border-radius:3px;font-size:12px;min-width:200px">
+    <option value="">-- Escolha uma conta cadastrada --</option>
+    ${S.contas.map(c => `<option value="${c.id}">${c.id} — ${c.banco_nome} ag ${c.agencia||'-'} / conta ${c.conta||'-'}</option>`).join('')}
+  </select>`;
 }
 
 async function loadPreviewVerif(fn) {
-  const cell = document.getElementById(`vprev-${fn}`);
-  if (cell) cell.innerHTML = '<span style="color:var(--muted);font-size:11px">...</span>';
   const r = await api(`/api/preview/${encodeURIComponent(fn)}`);
-  if (cell && r.ok)
-    cell.innerHTML = `<span style="font-size:11px;color:var(--muted)">${r.rows} lin | E: ${fmtMoeda(r.sum_entrada)} | S: ${fmtMoeda(r.sum_saida)}</span>`;
-  else if (cell)
-    cell.innerHTML = '<span style="font-size:11px;color:var(--red)">erro</span>';
+  if (r.ok) showAlert('alert2', `${fn}: ${r.rows} linhas, E ${fmtMoeda(r.sum_entrada)} / S ${fmtMoeda(r.sum_saida)}`, 'info');
+  else showAlert('alert2', `${fn}: preview indisponível`, 'warn');
 }
 
+async function resolverConflito(fn, conta_id, motivo) {
+  if (!conta_id) { showAlert('alert2','Sem conta no cabeçalho para resolver o conflito.','error'); return; }
+  const motivoFinal = (document.getElementById('motivo-'+fn)?.value || motivo || '').trim();
+  const r = await api('/api/confirmar-conta', 'POST',
+    { filename: fn, conta_id, motivo: motivoFinal || 'cabeçalho (recomendado)' });
+  if (r.ok) { showAlert('alert2', `${fn}: conflito resolvido para ${conta_id}.`, 'success'); loadVerificacao(); }
+  else      { showAlert('alert2', r.msg || 'Erro ao resolver conflito', 'error'); }
+}
+
+async function usarOutraConta(fn) {
+  const conta_id = document.getElementById('sel-outro-'+fn)?.value;
+  const motivo   = (document.getElementById('motivo-'+fn)?.value || '').trim();
+  if (!conta_id) { showAlert('alert2','Escolha uma conta para divergir do cabeçalho.','error'); return; }
+  if (!motivo)   { showAlert('alert2','Motivo obrigatório ao divergir do cabeçalho.','error'); return; }
+  const r = await api('/api/confirmar-conta', 'POST', { filename: fn, conta_id, motivo });
+  if (r.ok) { showAlert('alert2', `${fn}: conta ${conta_id} confirmada manualmente.`, 'warn'); loadVerificacao(); }
+  else      { showAlert('alert2', r.msg || 'Erro', 'error'); }
+}
+
+async function confirmarContaManual(fn) {
+  const conta_id = document.getElementById('sel-confirma-'+fn)?.value;
+  if (!conta_id) { showAlert('alert2','Escolha uma conta na lista.','error'); return; }
+  const r = await api('/api/confirmar-conta', 'POST',
+    { filename: fn, conta_id, motivo: 'confirmação manual (cabeçalho não identificou)' });
+  if (r.ok) { showAlert('alert2', `${fn}: conta ${conta_id} confirmada.`, 'success'); loadVerificacao(); }
+  else      { showAlert('alert2', r.msg || 'Erro', 'error'); }
+}
+
+// Legado v8 — mantida para compat do modal de edição
 async function confirmarUnidade(fn, uid) {
   await api('/api/confirmar-unidade', 'POST', { filename: fn, unit_id: uid });
-  const badge = document.getElementById(`vstatus-${fn}`);
-  if (badge) {
-    badge.className = `badge ${uid ? 'badge-verde' : 'badge-amarelo'}`;
-    badge.textContent = uid ? '✓ Verif.' : '⚠ Pend.';
-  }
 }
 
 // ========== TAB 3: PROCESSAR ==========
@@ -1272,8 +1420,58 @@ function switchConfigTab(name, btn) {
   document.querySelectorAll('#configModal .group-tab-btn').forEach(b=>b.classList.remove('active'));
   btn.classList.add('active');
   document.getElementById('configPanelUnidades').style.display = name==='unidades'?'block':'none';
+  document.getElementById('configPanelContas').style.display   = name==='contas'?'block':'none';
   document.getElementById('configPanelDepara').style.display   = name==='depara'?'block':'none';
   if (name==='depara') loadDepara();
+  if (name==='contas') loadContasUI();
+}
+
+async function loadContasUI() {
+  const r = await api('/api/contas');
+  S.contas = r.contas || [];
+  const unitSel = document.getElementById('cta-unit');
+  unitSel.innerHTML = '<option value="">--</option>' +
+    S.unidades.map(u => `<option value="${u.id}">${u.id} — ${u.desc_unidade}</option>`).join('');
+  const body = document.getElementById('bodyContas');
+  document.getElementById('emptyContas').style.display = S.contas.length ? 'none' : 'block';
+  body.innerHTML = S.contas.map(c => `
+    <tr>
+      <td><strong>${c.id}</strong></td>
+      <td>${c.banco_nome}${c.banco_codigo ? ' ('+c.banco_codigo+')' : ''}</td>
+      <td>${c.agencia || '-'} / ${c.conta || '-'}</td>
+      <td style="font-family:monospace;font-size:11px">${c.cnpj_titular || '-'}</td>
+      <td><span class="badge badge-cinza">${c.unit_id}</span></td>
+      <td style="text-align:center">
+        <button class="btn btn-danger btn-sm" onclick="deletarConta('${esc(c.id)}')">✕</button>
+      </td>
+    </tr>`).join('');
+}
+
+async function adicionarConta() {
+  const payload = {
+    id:          document.getElementById('cta-id').value.trim(),
+    banco_nome:  document.getElementById('cta-banco').value.trim(),
+    banco_codigo:document.getElementById('cta-bcod').value.trim() || null,
+    agencia:     document.getElementById('cta-ag').value.trim() || null,
+    conta:       document.getElementById('cta-conta').value.trim() || null,
+    cnpj_titular:document.getElementById('cta-cnpj').value.trim() || null,
+    unit_id:     document.getElementById('cta-unit').value,
+  };
+  if (!payload.id || !payload.banco_nome || !payload.unit_id) {
+    showAlert('alertContas', 'ID, Banco e Unidade são obrigatórios.', 'error'); return;
+  }
+  const r = await api('/api/contas','POST',payload);
+  if (r.ok) {
+    ['cta-id','cta-banco','cta-bcod','cta-ag','cta-conta','cta-cnpj'].forEach(id=>document.getElementById(id).value='');
+    showAlert('alertContas', `Conta ${payload.id} cadastrada.`, 'success');
+    loadContasUI();
+  } else { showAlert('alertContas', r.msg, 'error'); }
+}
+
+async function deletarConta(id) {
+  if (!confirm(`Remover conta ${id}? Lançamentos já processados não são afetados.`)) return;
+  const r = await api('/api/contas','DELETE',{id});
+  if (r.ok) loadContasUI();
 }
 
 async function loadDepara() {

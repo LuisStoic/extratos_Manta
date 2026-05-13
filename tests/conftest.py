@@ -16,6 +16,16 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 
+@pytest.fixture(autouse=True, scope='session')
+def _modo_teste_global():
+    """Ativa TESTING=True para que o LocalProxy SESSION sempre resolva para
+    `_DEFAULT_SESSION` (compartilhada), preservando o contrato pré-cookie
+    onde testes importam `app.SESSION` diretamente e o mutam."""
+    from app import app as flask_app
+    flask_app.config['TESTING'] = True
+    yield
+
+
 @pytest.fixture
 def fixtures_dir() -> Path:
     """Caminho absoluto para tests/fixtures/."""

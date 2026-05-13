@@ -47,11 +47,12 @@ DEPENDÊNCIAS
 ================================================================================
 """
 
-import os, json, re, difflib, hashlib, math, atexit, time
+import os, json, re, difflib, hashlib, math, atexit, time, uuid
 from pathlib import Path
-from flask import Flask, request, jsonify, render_template, send_file
+from flask import Flask, request, jsonify, render_template, send_file, g, has_request_context
 import pandas as pd
 from werkzeug.utils import secure_filename
+from werkzeug.local import LocalProxy
 from datetime import datetime
 import io
 from ofxparse import OfxParser
@@ -346,26 +347,77 @@ CFG = load_config()
 # ============================================================
 # SESSÃO EM MEMÓRIA
 # ============================================================
-# SESSION é reiniciado a cada restart do Flask.
-# Para persistência multi-sessão, migrar para SQLite.
+# SESSION é resolvido por cookie a cada request (via LocalProxy).
+# Cada browser tem seu próprio dict isolado em _SESSIONS_STORE.
+# Em modo TESTING (ou fora de request context), cai no _DEFAULT_SESSION
+# para preservar compatibilidade com a suíte de testes que importa
+# `SESSION` diretamente e o muta nas fixtures.
+# Para persistência multi-restart, ainda exigiria migrar para SQLite.
 
-SESSION = {
-    'arquivos':        [],    # [{filename, size, path, hash}]
-    'lancamentos':     [],    # [{id, arquivo, Data, Valor, Tipo, ...}]
-    'schema_map':      {},    # {col_original: anchor} da última execução
-    'processado':      False,
-    'doc_verificados': {},    # {filename: unit_id} — confirmações manuais (legado v8)
-    'previews':        {},    # {filename: dict} — cache de sumários
-    'progresso':       {'pct': 0, 'msg': '', 'ativo': False},
+def _nova_sessao() -> dict:
+    """Factory de sessão vazia. Centraliza o schema do estado por usuário."""
+    return {
+        'arquivos':        [],    # [{filename, size, path, hash}]
+        'lancamentos':     [],    # [{id, arquivo, Data, Valor, Tipo, ...}]
+        'schema_map':      {},    # {col_original: anchor} da última execução
+        'processado':      False,
+        'doc_verificados': {},    # {filename: unit_id} — confirmações manuais (legado v8)
+        'previews':        {},    # {filename: dict} — cache de sumários
+        'progresso':       {'pct': 0, 'msg': '', 'ativo': False},
+        # v9: identificação e controle de conta bancária por arquivo.
+        'deteccao_cab':         {},
+        'cruzamento':           {},
+        'conta_por_arquivo':    {},
+        'conta_por_arquivo_meta': {},
+        'arquivos_bloqueados':  [],
+        'audit_log':            [],
+    }
 
-    # v9: identificação e controle de conta bancária por arquivo.
-    'deteccao_cab':         {},  # {filename: dict do detectar_cabecalho}
-    'cruzamento':           {},  # {filename: dict do validar_cruzado}
-    'conta_por_arquivo':    {},  # {filename: conta_id} — resoluções manuais
-    'conta_por_arquivo_meta': {},  # {filename: {metodo_original, escolha_humana, motivo, timestamp}}
-    'arquivos_bloqueados':  [],  # lista de filenames bloqueados no último processar()
-    'audit_log':            [],  # [{ts, filename, acao, detalhes}]
-}
+
+_SESSIONS_STORE: dict = {}        # session_id (cookie) -> dict de sessão
+_DEFAULT_SESSION: dict = _nova_sessao()
+SESSION_COOKIE = 'app_session'
+SESSION_COOKIE_MAX_AGE = 30 * 86400   # 30 dias
+
+
+def _resolve_session() -> dict:
+    """Resolver do LocalProxy `SESSION`.
+
+    Fora de request context, ou em modo TESTING, retorna `_DEFAULT_SESSION`
+    (compartilhado). Dentro de request real, retorna o dict ligado ao cookie
+    `app_session` do browser, criando um novo se necessário.
+    """
+    if not has_request_context():
+        return _DEFAULT_SESSION
+    if app.config.get('TESTING'):
+        return _DEFAULT_SESSION
+    cached = getattr(g, '_app_session', None)
+    if cached is not None:
+        return cached
+    sid = request.cookies.get(SESSION_COOKIE)
+    if not sid or sid not in _SESSIONS_STORE:
+        sid = uuid.uuid4().hex
+        _SESSIONS_STORE[sid] = _nova_sessao()
+        g._needs_cookie = sid
+    g._app_session    = _SESSIONS_STORE[sid]
+    g._app_session_id = sid
+    return _SESSIONS_STORE[sid]
+
+
+SESSION = LocalProxy(_resolve_session)
+
+
+@app.after_request
+def _emitir_cookie_sessao(response):
+    """Emite o cookie `app_session` quando uma sessão nova foi criada."""
+    sid = getattr(g, '_needs_cookie', None)
+    if sid:
+        response.set_cookie(
+            SESSION_COOKIE, sid,
+            max_age=SESSION_COOKIE_MAX_AGE,
+            httponly=True, samesite='Lax',
+        )
+    return response
 
 
 # ============================================================
@@ -2229,17 +2281,12 @@ def reset_depara():
 def limpar():
     """Reinicia sessão e remove arquivos do disco. Preserva configurações.
 
-    Preserva `.gitkeep` em uploads/ para manter o controle de versão da pasta.
+    Como `SESSION` agora é um LocalProxy, não pode ser reatribuído — muta
+    o dict subjacente in-place via clear()/update(). Preserva `.gitkeep`
+    em uploads/.
     """
-    global SESSION
-    SESSION = {
-        'arquivos': [], 'lancamentos': [], 'schema_map': {},
-        'processado': False, 'doc_verificados': {}, 'previews': {},
-        'progresso': {'pct': 0, 'msg': '', 'ativo': False},
-        'deteccao_cab': {}, 'cruzamento': {},
-        'conta_por_arquivo': {}, 'conta_por_arquivo_meta': {},
-        'arquivos_bloqueados': [], 'audit_log': [],
-    }
+    SESSION.clear()
+    SESSION.update(_nova_sessao())
     removidos = _limpar_uploads_dir()
     return jsonify({'ok': True, 'arquivos_removidos': removidos})
 

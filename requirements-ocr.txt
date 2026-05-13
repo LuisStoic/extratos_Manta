@@ -1,0 +1,18 @@
+# Fallbacks de extração de PDF — só são necessários para PDFs
+# escaneados ou layouts onde pdfplumber falha.
+#
+# Pré-requisitos de SO (não pip):
+#   - Tesseract OCR  (https://tesseract-ocr.github.io/)
+#       Windows: instalador oficial do projeto
+#       Linux:   apt install tesseract-ocr tesseract-ocr-por
+#   - Poppler        (necessário para pdf2image)
+#       Windows: baixar binários e adicionar ao PATH
+#       Linux:   apt install poppler-utils
+#
+# Em PaaS efêmero (Render free), pymupdf pode falhar na build por
+# exigir compilação C. Se acontecer, use só pdfplumber (já em
+# requirements.txt) e aceite que PDFs escaneados não serão lidos.
+
+pymupdf>=1.24
+pytesseract>=0.3.10
+pdf2image>=1.17

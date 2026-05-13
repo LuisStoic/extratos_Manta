@@ -59,7 +59,8 @@
   "depara": {
     "Data": "Data",
     "Descrição": "Descricao",
-    "Valor": "Valor"
+    "Valor": "Valor",
+    "Histórico": "Descricao"
   },
   "fn_patterns": {}
 }

@@ -47,21 +47,32 @@ DEPENDÊNCIAS
 ================================================================================
 """
 
-import os, json, re, difflib, hashlib, math
+import os, json, re, difflib, hashlib, math, atexit, time, uuid
 from pathlib import Path
-from flask import Flask, request, jsonify, render_template, send_file
+from flask import Flask, request, jsonify, render_template, send_file, g, has_request_context
 import pandas as pd
 from werkzeug.utils import secure_filename
+from werkzeug.local import LocalProxy
 from datetime import datetime
 import io
 from ofxparse import OfxParser
+
+from detectores_banco import detectar_cabecalho
+from resolucao_conta  import resolver_conta, validar_cruzado
 
 # ============================================================
 # CONFIGURAÇÃO FLASK
 # ============================================================
 
 app = Flask(__name__)
-app.config['MAX_CONTENT_LENGTH'] = 100 * 1024 * 1024  # limite de upload: 100 MB
+MAX_UPLOAD_MB = 200
+# Tamanho-alvo de cada POST de upload feito pelo frontend. O servidor
+# aceita até MAX_UPLOAD_MB, mas o proxy do PaaS pode capar o body em
+# valor menor (Render Free é descrito em alguns relatos como ~30 MB).
+# O frontend usa MAX_BATCH_MB para particionar uploads grandes em
+# múltiplos POSTs sequenciais.
+MAX_BATCH_MB  = 25
+app.config['MAX_CONTENT_LENGTH'] = MAX_UPLOAD_MB * 1024 * 1024
 UPLOAD_FOLDER = Path(__file__).parent / 'uploads'
 UPLOAD_FOLDER.mkdir(exist_ok=True)
 app.config['UPLOAD_FOLDER'] = UPLOAD_FOLDER
@@ -105,6 +116,83 @@ def jsonify(*args, **kwargs):
         mimetype='application/json'
     )
     return resp
+
+
+@app.errorhandler(413)
+def upload_excedeu_limite(_e):
+    """Resposta amigável quando o request total ultrapassa MAX_CONTENT_LENGTH."""
+    return jsonify({
+        'ok': False,
+        'erro': 'upload_excedeu_limite',
+        'mensagem': (
+            f'O envio total excedeu o limite de {MAX_UPLOAD_MB} MB por requisição. '
+            f'Divida os arquivos em lotes menores e envie em rodadas separadas.'
+        ),
+        'limite_mb': MAX_UPLOAD_MB,
+    }), 413
+
+
+# ============================================================
+# CLEANUP DE UPLOADS — garantia de "sem resquícios"
+# ============================================================
+# Três escotilhas:
+#   1. /api/limpar (POST) — limpeza manual via botão "Reiniciar" do UI.
+#   2. atexit — limpa no shutdown gracioso do processo.
+#   3. _cleanup_uploads_velhos — varre na boot e remove arquivos com
+#      mtime > UPLOAD_TTL_HORAS. Defesa em profundidade para o caso de
+#      crash anterior ter deixado lixo (atexit não roda em SIGKILL).
+#
+# Não há cleanup imediato pós-export proposital: re-export do mesmo
+# Excel (após ajuste de Grupo B na UI) é UX comum e exige SESSION em
+# memória; arquivos em disco já não são re-lidos após processar(), só
+# ficam ocupando espaço.
+
+UPLOAD_TTL_HORAS = 24
+
+def _limpar_uploads_dir(*, preservar_gitkeep: bool = True) -> int:
+    """Apaga arquivos em UPLOAD_FOLDER. Retorna quantidade removida.
+
+    O `.gitkeep` é preservado por padrão para manter a pasta no
+    controle de versão.
+    """
+    n = 0
+    for f in UPLOAD_FOLDER.glob('*'):
+        if preservar_gitkeep and f.name == '.gitkeep':
+            continue
+        try:
+            f.unlink()
+            n += 1
+        except Exception:
+            pass
+    return n
+
+
+def _cleanup_uploads_velhos(ttl_horas: int = UPLOAD_TTL_HORAS) -> int:
+    """Remove arquivos em UPLOAD_FOLDER com mtime mais antigo que ttl_horas.
+
+    Chamado na boot. Não toca em .gitkeep nem em subpastas.
+    """
+    limite = time.time() - ttl_horas * 3600
+    n = 0
+    for f in UPLOAD_FOLDER.glob('*'):
+        if f.name == '.gitkeep' or not f.is_file():
+            continue
+        try:
+            if f.stat().st_mtime < limite:
+                f.unlink()
+                n += 1
+        except Exception:
+            pass
+    return n
+
+
+# Boot: limpa resquícios de sessões anteriores abandonadas
+_n_velhos = _cleanup_uploads_velhos()
+if _n_velhos:
+    print(f"[cleanup] removidos {_n_velhos} arquivos com mtime > {UPLOAD_TTL_HORAS}h")
+
+# Shutdown gracioso: limpa tudo (não dispara em SIGKILL — daí a TTL na boot)
+atexit.register(_limpar_uploads_dir)
 
 
 # ============================================================
@@ -197,17 +285,60 @@ def load_config() -> dict:
     Carrega configurações do config.json.
     Retorna defaults se o arquivo não existir ou estiver corrompido.
     Garante backward compatibility adicionando chaves ausentes.
+
+    Migração v9: 'contas_bancarias' é criada como [] se ausente.
+    fn_patterns é mantida intacta por compat com fluxo v8 em modo_legado,
+    mas registra aviso em NOTAS_REFATORACAO.md na primeira carga onde
+    contas_bancarias está vazia e fn_patterns tem entradas.
     """
     if CONFIG_PATH.exists():
         try:
             c = json.loads(CONFIG_PATH.read_text('utf-8'))
-            if 'unidades'    not in c: c['unidades']    = DEFAULT_UNIDADES
-            if 'depara'      not in c: c['depara']      = {}
-            if 'fn_patterns' not in c: c['fn_patterns'] = {}
+            if 'unidades'         not in c: c['unidades']         = DEFAULT_UNIDADES
+            if 'depara'           not in c: c['depara']           = {}
+            if 'fn_patterns'      not in c: c['fn_patterns']      = {}
+            if 'contas_bancarias' not in c:
+                c['contas_bancarias'] = []
+                _aviso_migracao_v9(c)
             return c
         except Exception as e:
             print(f"[CONFIG] Erro ao carregar: {e}")
-    return {'unidades': DEFAULT_UNIDADES, 'depara': {}, 'fn_patterns': {}}
+    return {'unidades': DEFAULT_UNIDADES, 'depara': {}, 'fn_patterns': {},
+            'contas_bancarias': []}
+
+
+def _aviso_migracao_v9(cfg: dict) -> None:
+    """Anexa aviso em NOTAS_REFATORACAO.md quando config v8 é lida.
+
+    Chamado uma única vez no upgrade. Silencioso se o arquivo de notas
+    não existir (ambiente não-dev).
+    """
+    if not cfg.get('fn_patterns'):
+        return
+    notas = Path(__file__).parent / 'NOTAS_REFATORACAO.md'
+    if not notas.exists():
+        return
+    stamp = datetime.now().strftime('%Y-%m-%d')
+    marcador = '## Migração v8 → v9 detectada'
+    try:
+        conteudo_atual = notas.read_text('utf-8')
+        if marcador in conteudo_atual:
+            return
+        bloco = (
+            f"\n\n---\n\n{marcador} ({stamp})\n\n"
+            f"- `config.json` foi carregada pela primeira vez com "
+            f"`contas_bancarias` vazia e `fn_patterns` populada ({len(cfg['fn_patterns'])} entradas).\n"
+            f"- `fn_patterns` são legado v8 e devem ser substituídos por "
+            f"`contas_bancarias`. Enquanto não houver contas cadastradas, "
+            f"o sistema opera em **modo_legado** (Rastreab=BAIXA em tudo).\n"
+            f"- Entradas atuais de fn_patterns (para migração manual):\n"
+            + '\n'.join(f"  - `{k}` → unit_id `{v}`"
+                        for k, v in cfg['fn_patterns'].items())
+            + "\n"
+        )
+        notas.write_text(conteudo_atual + bloco, 'utf-8')
+    except Exception as e:
+        print(f"[MIGRACAO_V9] Aviso não pôde ser registrado: {e}")
 
 def save_config(cfg: dict) -> None:
     """Persiste configuração em config.json (UTF-8, indentado)."""
@@ -222,18 +353,96 @@ CFG = load_config()
 # ============================================================
 # SESSÃO EM MEMÓRIA
 # ============================================================
-# SESSION é reiniciado a cada restart do Flask.
-# Para persistência multi-sessão, migrar para SQLite.
+# SESSION é resolvido por cookie a cada request (via LocalProxy).
+# Cada browser tem seu próprio dict isolado em _SESSIONS_STORE.
+# Em modo TESTING (ou fora de request context), cai no _DEFAULT_SESSION
+# para preservar compatibilidade com a suíte de testes que importa
+# `SESSION` diretamente e o muta nas fixtures.
+# Para persistência multi-restart, ainda exigiria migrar para SQLite.
 
-SESSION = {
-    'arquivos':        [],    # [{filename, size, path, hash}]
-    'lancamentos':     [],    # [{id, arquivo, Data, Valor, Tipo, ...}]
-    'schema_map':      {},    # {col_original: anchor} da última execução
-    'processado':      False,
-    'doc_verificados': {},    # {filename: unit_id} — confirmações manuais
-    'previews':        {},    # {filename: dict} — cache de sumários
-    'progresso':       {'pct': 0, 'msg': '', 'ativo': False},
-}
+def _nova_sessao() -> dict:
+    """Factory de sessão vazia. Centraliza o schema do estado por usuário."""
+    return {
+        'arquivos':        [],    # [{filename, size, path, hash}]
+        'lancamentos':     [],    # [{id, arquivo, Data, Valor, Tipo, ...}]
+        'schema_map':      {},    # {col_original: anchor} da última execução
+        'processado':      False,
+        'doc_verificados': {},    # {filename: unit_id} — confirmações manuais (legado v8)
+        'previews':        {},    # {filename: dict} — cache de sumários
+        'progresso':       {'pct': 0, 'msg': '', 'ativo': False},
+        # v9: identificação e controle de conta bancária por arquivo.
+        'deteccao_cab':         {},
+        'cruzamento':           {},
+        'conta_por_arquivo':    {},
+        'conta_por_arquivo_meta': {},
+        'arquivos_bloqueados':  [],
+        'audit_log':            [],
+    }
+
+
+_SESSIONS_STORE: dict = {}        # session_id (cookie) -> dict de sessão
+_DEFAULT_SESSION: dict = _nova_sessao()
+SESSION_COOKIE = 'app_session'
+SESSION_COOKIE_MAX_AGE = 30 * 86400   # 30 dias
+SESSIONS_STORE_TTL_SECS = 7 * 86400   # 7 dias sem acesso → coleta
+
+
+def _cleanup_sessoes_velhas() -> int:
+    """Remove sessões de `_SESSIONS_STORE` inativas há mais de SESSIONS_STORE_TTL_SECS.
+
+    Evita memory leak quando muitos cookies diferentes são gerados ao longo
+    do tempo (ex.: muitos browsers/IPs distintos visitando o mesmo deploy).
+    Chamado lazy via `/api/info` (request mais comum no ciclo de vida do UI).
+    """
+    cutoff = time.time() - SESSIONS_STORE_TTL_SECS
+    expirados = [sid for sid, s in _SESSIONS_STORE.items()
+                 if s.get('_last_access', 0) < cutoff]
+    for sid in expirados:
+        del _SESSIONS_STORE[sid]
+    return len(expirados)
+
+
+def _resolve_session() -> dict:
+    """Resolver do LocalProxy `SESSION`.
+
+    Fora de request context, ou em modo TESTING, retorna `_DEFAULT_SESSION`
+    (compartilhado). Dentro de request real, retorna o dict ligado ao cookie
+    `app_session` do browser, criando um novo se necessário. Atualiza
+    `_last_access` para alimentar a coleta de TTL.
+    """
+    if not has_request_context():
+        return _DEFAULT_SESSION
+    if app.config.get('TESTING'):
+        return _DEFAULT_SESSION
+    cached = getattr(g, '_app_session', None)
+    if cached is not None:
+        return cached
+    sid = request.cookies.get(SESSION_COOKIE)
+    if not sid or sid not in _SESSIONS_STORE:
+        sid = uuid.uuid4().hex
+        _SESSIONS_STORE[sid] = _nova_sessao()
+        g._needs_cookie = sid
+    sess = _SESSIONS_STORE[sid]
+    sess['_last_access'] = time.time()
+    g._app_session    = sess
+    g._app_session_id = sid
+    return sess
+
+
+SESSION = LocalProxy(_resolve_session)
+
+
+@app.after_request
+def _emitir_cookie_sessao(response):
+    """Emite o cookie `app_session` quando uma sessão nova foi criada."""
+    sid = getattr(g, '_needs_cookie', None)
+    if sid:
+        response.set_cookie(
+            SESSION_COOKIE, sid,
+            max_age=SESSION_COOKIE_MAX_AGE,
+            httponly=True, samesite='Lax',
+        )
+    return response
 
 
 # ============================================================
@@ -304,47 +513,101 @@ def inv_mapa(schema_map: dict) -> dict:
 def parse_valor(v) -> float | None:
     """
     Converte valor monetário (string ou número) para float.
-    Lida com formatos BR: vírgula decimal, ponto milhar, R$,
-    sinal negativo à direita (BRB: '84.000,00-').
-    Retorna None para nan, vazio ou não-parseável.
+
+    Regra de separador: o ÚLTIMO símbolo ',' ou '.' na string é o
+    separador decimal; os anteriores (do mesmo tipo ou diferentes) são
+    separadores de milhar. Aceita formato BR ('1.500,00'), US/canônico
+    ('1,500.00') e variações misturadas ('1.500.000,00', '1,500,000.00').
+
+    Sinais aceitos:
+      - prefixo '+' ou '-':  "-1.500,00"
+      - sufixo '-' (BRB):    "84.000,00-"
+      - parênteses contábeis: "(1.500,00)" → -1500.0
+
+    Retorna None para NaN, vazio, None ou string não-parseável.
     """
-    if v is None: return None
+    if v is None:
+        return None
     s = str(v).strip()
-    if s.lower() in ('nan', 'nat', 'none', ''): return None
+    if not s or s.lower() in ('nan', 'nat', 'none'):
+        return None
+
+    # Convenção contábil: (1.500,00) → -1500.00
+    sinal = 1
+    if s.startswith('(') and s.endswith(')'):
+        sinal = -1
+        s = s[1:-1].strip()
     s = re.sub(r'[R$\s\u00a0\xa0]', '', s)
 
     # Sinal negativo posterior (BRB): "84.000,00-"
-    sinal = -1.0 if s.endswith('-') else 1.0
-    s = s.rstrip('-').lstrip('+')
+    if s.endswith('-'):
+        sinal = -sinal
+        s = s.rstrip('-')
 
-    # Formato BR ('.' milhar, ',' decimal) vs US/canônico ('.' decimal)
-    if ',' in s and '.' in s:
-        s = s.replace('.', '').replace(',', '.')
-    elif ',' in s:
-        s = s.replace(',', '.')
-    try:
-        return float(s) * sinal
-    except:
+    # Sinal explícito no início
+    if s.startswith('-'):
+        sinal = -sinal
+        s = s[1:]
+    elif s.startswith('+'):
+        s = s[1:]
+
+    if not s:
         return None
 
-def parse_data(v) -> str | None:
+    # Último ',' ou '.' é decimal; os anteriores são milhar.
+    last_comma = s.rfind(',')
+    last_dot   = s.rfind('.')
+    if last_comma > last_dot:
+        s = s.replace('.', '').replace(',', '.')
+    elif last_dot > last_comma:
+        s = s.replace(',', '')
+    # else: nenhum separador — inteiro puro
+
+    try:
+        return float(s) * sinal
+    except ValueError:
+        return None
+
+def parse_data(v, preservar_raw: bool = False):
     """
     Converte data em múltiplos formatos para ISO YYYY-MM-DD.
-    Retorna string original se nenhum formato reconhecido funcionar
-    (preserva o dado mas pode causar issue 'data_ausente' downstream).
+
+    Retorna None quando:
+      - entrada é vazia/None/NaN/NaT
+      - nenhum formato reconhecido funciona
+      - data é calendaricamente inválida (ex: '00/00/0000', '31/02/2026')
+
+    Se preservar_raw=True, retorna tupla (iso_ou_None, string_original).
+    Isso permite distinguir 'data_ausente' (raw vazio) de 'data_invalida'
+    (raw preenchido mas não parseável) no classificador.
     """
-    if v is None: return None
+    raw = '' if v is None else str(v).strip()
+
+    def _ret(valid):
+        return (valid, raw) if preservar_raw else valid
+
+    if v is None:
+        return _ret(None)
+
     if isinstance(v, (pd.Timestamp, datetime)):
-        return v.strftime('%Y-%m-%d')
-    s = str(v).strip()
-    if s.lower() in ('nan', 'nat', 'none', 'nd', ''): return None
+        try:
+            if pd.isna(v):
+                return _ret(None)
+            return _ret(v.strftime('%Y-%m-%d'))
+        except (ValueError, AttributeError):
+            return _ret(None)
+
+    s = raw
+    if not s or s.lower() in ('nan', 'nat', 'none', 'nd'):
+        return _ret(None)
+
     for fmt in ['%d/%m/%Y', '%Y-%m-%d', '%d-%m-%Y', '%d.%m.%Y',
                 '%Y%m%d', '%d/%m/%y', '%m/%d/%Y']:
         try:
-            return datetime.strptime(s[:10], fmt).strftime('%Y-%m-%d')
-        except:
+            return _ret(datetime.strptime(s[:10], fmt).strftime('%Y-%m-%d'))
+        except ValueError:
             pass
-    return s
+    return _ret(None)
 
 
 # ============================================================
@@ -412,22 +675,26 @@ def classificar(row_norm: dict, unit_conf: int, unit_confirmada: bool) -> tuple[
     Classifica lançamento em Grupo A (confiável) ou B (revisão humana).
 
     Critérios para Grupo B (qualquer um):
-      - data_ausente:      Data None ou não parseável
+      - data_ausente:      Data None E Data_Raw vazio (campo fonte vazio)
+      - data_invalida:     Data None E Data_Raw preenchido (parse falhou)
       - valor_ausente:     Valor None após todos os fallbacks
       - descricao_ausente: Descrição vazia após todos os fallbacks
       - tipo_indefinido:   Nenhuma estratégia de tipo funcionou
       - unidade_incerta:   Não confirmada manualmente E fuzzy < 80%
 
+    data_ausente e data_invalida são mutuamente exclusivos.
+
     Confiabilidade:
       ALTA  → Grupo A
       MÉDIA → Grupo B com apenas tipo_indefinido
-      BAIXA → Grupo B com campo obrigatório ausente
+      BAIXA → Grupo B com campo obrigatório ausente (inclui data_invalida)
 
     Returns: (grupo, confiabilidade, issues)
     """
     issues = []
-    if not row_norm.get('Data'):
-        issues.append('data_ausente')
+    if row_norm.get('Data') is None:
+        data_raw = str(row_norm.get('Data_Raw', '') or '').strip()
+        issues.append('data_invalida' if data_raw else 'data_ausente')
     if row_norm.get('Valor') is None:
         issues.append('valor_ausente')
     if not str(row_norm.get('Descricao', '')).strip():
@@ -827,6 +1094,12 @@ def upload():
                              'motivo': 'Arquivo já carregado nesta sessão (mesmo nome)'})
             continue
         fp = UPLOAD_FOLDER / fn
+        # Colisão no disco (sessão anterior ainda não limpa, crash, etc.):
+        # adiciona sufixo timestamp em vez de sobrescrever silenciosamente.
+        if fp.exists():
+            stamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+            fn = f"{Path(fn).stem}_{stamp}{Path(fn).suffix}"
+            fp = UPLOAD_FOLDER / fn
         f.save(fp)
         file_hash = _md5(fp)
         if file_hash in hashes_existentes:
@@ -858,13 +1131,14 @@ def pdf_warnings():
 
 @app.route('/api/remover-arquivo/<filename>', methods=['DELETE'])
 def remover_arquivo(filename):
-    """Remove arquivo da sessão e do disco. Limpa preview e verificação associados."""
+    """Remove arquivo da sessão e do disco. Limpa estados associados."""
     fp = UPLOAD_FOLDER / filename
     try: fp.unlink(missing_ok=True)
     except: pass
-    SESSION['arquivos']        = [a for a in SESSION['arquivos']   if a['filename'] != filename]
-    SESSION['previews'].pop(filename, None)
-    SESSION['doc_verificados'].pop(filename, None)
+    SESSION['arquivos'] = [a for a in SESSION['arquivos'] if a['filename'] != filename]
+    for chave in ('previews', 'doc_verificados', 'deteccao_cab', 'cruzamento',
+                  'conta_por_arquivo', 'conta_por_arquivo_meta'):
+        SESSION[chave].pop(filename, None)
     return jsonify({'ok': True})
 
 
@@ -888,22 +1162,78 @@ def preview_arquivo(filename):
 
 @app.route('/api/verificar-documentos')
 def verificar_documentos():
-    """Lista arquivos com unidade detectada, confiança e status de verificação."""
+    """Lista arquivos com dupla identificação (cabeçalho × nome do arquivo).
+
+    Para cada arquivo, roda o detector de cabeçalho (se ainda não rodou neste
+    ciclo), o encontrar_unidade (controle secundário) e validar_cruzado.
+    A resposta é estruturada em dois blocos (cabecalho, nome_arquivo) mais
+    o banner de status do cruzamento.
+    """
     documentos = []
+    contas_cfg = CFG.get('contas_bancarias', [])
+
     for arq in SESSION['arquivos']:
-        fn = arq['filename']
-        uid, confianca, metodo = encontrar_unidade(fn)
-        confirmada = SESSION['doc_verificados'].get(fn)
+        fn   = arq['filename']
+        path = arq['path']
+
+        deteccao = SESSION['deteccao_cab'].get(fn)
+        if deteccao is None:
+            deteccao = detectar_cabecalho(path, fn)
+            SESSION['deteccao_cab'][fn] = deteccao
+
+        conta_id_cab, conta_conf, conta_motivo = (
+            resolver_conta(deteccao, contas_cfg) if deteccao else (None, 0, 'sem_cabecalho')
+        )
+        conta_obj = next((c for c in contas_cfg if c['id'] == conta_id_cab), None) if conta_id_cab else None
+
+        uid_nome, conf_nome, metodo_nome = encontrar_unidade(fn)
+        unit_id_nome = uid_nome if conf_nome >= 80 else None
+
+        cruzamento = validar_cruzado(conta_id_cab, unit_id_nome, contas_cfg)
+        SESSION['cruzamento'][fn] = cruzamento
+
+        confirmacao = SESSION['conta_por_arquivo'].get(fn)
+        meta_conf   = SESSION['conta_por_arquivo_meta'].get(fn)
+
         documentos.append({
-            'filename':  fn,
-            'detectada': uid,
-            'confianca': confianca,
-            'metodo':    metodo,
-            'confirmada': confirmada,
-            'status':    'verificado' if (confirmada or confianca >= 80) else 'pendente',
-            'preview':   SESSION['previews'].get(fn, {}),
+            'filename': fn,
+            'preview':  SESSION['previews'].get(fn, {}),
+            'cabecalho': {
+                'banco_detectado': deteccao.get('banco_detectado') if deteccao else None,
+                'banco_codigo':    deteccao.get('banco_codigo')    if deteccao else None,
+                'agencia':         deteccao.get('agencia')         if deteccao else None,
+                'conta':           deteccao.get('conta')           if deteccao else None,
+                'cnpj_titular':    deteccao.get('cnpj_titular')    if deteccao else None,
+                'conta_id_resolvida':  conta_id_cab,
+                'conta_desc_resolvida': (
+                    f"{conta_obj['banco_nome']} — ag {conta_obj.get('agencia') or '-'} / "
+                    f"conta {conta_obj.get('conta') or '-'}"
+                ) if conta_obj else None,
+                'unit_id_resolvida':   conta_obj.get('unit_id') if conta_obj else None,
+                'conta_confianca':     conta_conf,
+                'conta_motivo':        conta_motivo,
+            },
+            'nome_arquivo': {
+                'unit_id_sugerido': uid_nome,
+                'confianca':        conf_nome,
+                'metodo':           metodo_nome,
+            },
+            'cruzamento':      cruzamento,
+            'confirmacao':     confirmacao,
+            'confirmacao_meta': meta_conf,
+            # Legado v8 — conservado para não quebrar UI atual enquanto migra.
+            'detectada':  uid_nome,
+            'confianca':  conf_nome,
+            'metodo':     metodo_nome,
+            'confirmada': SESSION['doc_verificados'].get(fn),
+            'status': (
+                'verificado' if cruzamento['status'] in ('concordam', 'apenas_cabecalho')
+                              or confirmacao or cruzamento['status'] == 'modo_legado'
+                else 'pendente'
+            ),
         })
-    return jsonify({'documentos': documentos})
+    return jsonify({'documentos': documentos,
+                    'modo_legado': not CFG.get('contas_bancarias')})
 
 @app.route('/api/confirmar-unidade', methods=['POST'])
 def confirmar_unidade():
@@ -926,8 +1256,94 @@ def confirmar_unidade():
 
 
 # ============================================================
+# HELPERS v9 — DECISÃO DE ATRIBUIÇÃO CONTA / UNIDADE
+# ============================================================
+
+def _unit_id_from_conta(conta_id: str | None) -> str | None:
+    if not conta_id:
+        return None
+    for c in CFG.get('contas_bancarias', []):
+        if c.get('id') == conta_id:
+            return c.get('unit_id')
+    return None
+
+
+def _resolver_atribuicao(fn: str, cruzamento: dict, uid_nome: str | None,
+                          cfg: dict) -> tuple[str | None, str | None, str, str]:
+    """Decide a atribuição final (unit_id, conta_id, rastreab, metodo) para um arquivo.
+
+    Consulta SESSION['conta_por_arquivo'] para casos que exigem decisão humana.
+    Em casos de bloqueio (conflito/apenas_nome/nenhum sem confirmação), registra
+    em SESSION['arquivos_bloqueados'] e devolve (None, None, ...) — o loop de
+    processamento deve pular arquivos nessa situação.
+
+    Retorna: (unit_id, conta_id, confiab_rastreab, metodo_atribuicao)
+    """
+    status           = cruzamento['status']
+    confirmacao      = SESSION['conta_por_arquivo'].get(fn)
+    meta_confirmacao = SESSION['conta_por_arquivo_meta'].get(fn, {})
+
+    # Casos limpos — cabeçalho decide (com ou sem concordância do nome)
+    if status in ('concordam', 'apenas_cabecalho'):
+        return (cruzamento['unit_id'], cruzamento['conta_id'],
+                'ALTA', cruzamento['metodo'])
+
+    # Modo legado — preserva comportamento v8
+    if status == 'modo_legado':
+        uid = SESSION['doc_verificados'].get(fn) or uid_nome
+        return uid, None, 'BAIXA', 'modo_legado'
+
+    # Conflito, apenas_nome, nenhum: requer confirmação humana.
+    if confirmacao:
+        unit_id_final = _unit_id_from_conta(confirmacao)
+        rastreab      = 'MEDIA'
+        metodo        = f"{status}_confirmado_manual:{confirmacao}"
+
+        SESSION['audit_log'].append({
+            'ts':        datetime.now().isoformat(timespec='seconds'),
+            'filename':  fn,
+            'acao':      f'{status}_resolvido_manualmente',
+            'detalhes': {
+                'metodo_original':      cruzamento['metodo'],
+                'conta_cabecalho':      cruzamento.get('conta_id'),
+                'unit_id_cabecalho':    cruzamento.get('unit_id_cabecalho'),
+                'unit_id_nome_arquivo': cruzamento.get('unit_id_nome_arquivo'),
+                'escolha_humana':       confirmacao,
+                'motivo':               meta_confirmacao.get('motivo', ''),
+            },
+        })
+        return unit_id_final, confirmacao, rastreab, metodo
+
+    # Sem confirmação: bloqueia.
+    motivo_msg = {
+        'conflito':    f"Conflito entre cabeçalho ({cruzamento.get('unit_id_cabecalho')}) "
+                       f"e nome do arquivo ({cruzamento.get('unit_id_nome_arquivo')}). "
+                       f"Confirme manualmente antes de processar.",
+        'apenas_nome': f"Nome do arquivo sugere {cruzamento.get('unit_id_nome_arquivo')} "
+                       f"mas o cabeçalho não foi reconhecido. Confirme a conta manualmente.",
+        'nenhum':      "Nem cabeçalho nem nome do arquivo identificam a conta. "
+                       "Cadastre a conta em Configurações e confirme o arquivo.",
+    }.get(status, f'Status não processável: {status}')
+
+    SESSION['arquivos_bloqueados'].append({
+        'filename':              fn,
+        'status':                status,
+        'conta_id_cabecalho':    cruzamento.get('conta_id'),
+        'unit_id_cabecalho':     cruzamento.get('unit_id_cabecalho'),
+        'unit_id_nome_arquivo': cruzamento.get('unit_id_nome_arquivo'),
+        'msg':                   motivo_msg,
+    })
+    return None, None, 'BAIXA', cruzamento['metodo']
+
+
+# ============================================================
 # ROTAS — PROCESSAMENTO PRINCIPAL
 # ============================================================
+
+# Limite de tempo para considerar um /api/processar "stale" (abandonado/crashed).
+# Após esse limite o guard 409 libera nova requisição mesmo com ativo=True.
+PROCESSAR_STALE_SECS = 30 * 60   # 30 minutos
+
 
 @app.route('/api/processar', methods=['POST'])
 def processar():
@@ -938,11 +1354,30 @@ def processar():
     Passo 2 — Linha a linha: extrai campos, aplica fallbacks B1/B2/B3, classifica.
 
     Progresso disponível via GET /api/progresso (polling).
+    Snapshot do resultado (mesmo após perda de conexão HTTP do POST original)
+    disponível via GET /api/resultado.
     """
     if not SESSION['arquivos']:
         return jsonify({'ok': False, 'msg': 'Nenhum arquivo carregado'}), 400
 
-    SESSION['progresso'] = {'pct': 2, 'msg': 'Detectando schema...', 'ativo': True}
+    # Guard contra processar concorrente na mesma sessão. Stale após
+    # PROCESSAR_STALE_SECS — protege contra worker SIGKILL que deixou
+    # 'ativo=True' órfão na SESSION.
+    if SESSION['progresso'].get('ativo'):
+        started = SESSION['progresso'].get('started_at', 0)
+        if time.time() - started < PROCESSAR_STALE_SECS:
+            return jsonify({
+                'ok': False,
+                'erro': 'processar_em_andamento',
+                'msg': 'Já há processamento em andamento nesta sessão. '
+                       'Aguarde concluir ou consulte /api/resultado.',
+                'progresso': SESSION['progresso'],
+            }), 409
+
+    SESSION['progresso'] = {
+        'pct': 2, 'msg': 'Detectando schema...', 'ativo': True,
+        'started_at': time.time(),
+    }
 
     # Passo 1: schema global (usa o arquivo com mais anchors obrigatórios como referência)
     all_file_schemas = {}
@@ -971,6 +1406,11 @@ def processar():
     todos = []
     total = len(SESSION['arquivos'])
 
+    # v9: estado de detecção e bloqueios por arquivo é reiniciado a cada processar().
+    SESSION['deteccao_cab'] = {}
+    SESSION['cruzamento']   = {}
+    SESSION['arquivos_bloqueados'] = []
+
     erros_arquivos = []
     for idx, arq in enumerate(SESSION['arquivos']):
         fn  = arq['filename']
@@ -978,11 +1418,39 @@ def processar():
         SESSION['progresso'] = {'pct': pct, 'msg': f'Processando {fn} ({idx+1}/{total})...', 'ativo': True}
 
         try:
-            confirmada_id = SESSION['doc_verificados'].get(fn)
-            uid, confianca = (confirmada_id, 100) if confirmada_id else encontrar_unidade(fn)[:2]
+            # ── v9: Identificação por cabeçalho (fonte primária) ──────────
+            deteccao_cab = detectar_cabecalho(arq['path'], fn)
+            SESSION['deteccao_cab'][fn] = deteccao_cab
+
+            conta_id_cab = None
+            if deteccao_cab:
+                conta_id_cab, _, _ = resolver_conta(deteccao_cab, CFG['contas_bancarias'])
+
+            # ── v9: Controle secundário pelo nome do arquivo (NUNCA decide sozinho) ──
+            uid_nome, conf_nome, _ = encontrar_unidade(fn)
+            unit_id_nome = uid_nome if conf_nome >= 80 else None
+
+            # ── v9: Cruzamento e matriz de decisão ─────────────────────────
+            cruzamento = validar_cruzado(conta_id_cab, unit_id_nome, CFG['contas_bancarias'])
+            SESSION['cruzamento'][fn] = cruzamento
+
+            uid, conta_id_final, rastreab, metodo_atrib = _resolver_atribuicao(
+                fn, cruzamento, uid_nome, CFG
+            )
+
+            # Arquivo bloqueado → não entra em lançamentos.
+            if uid is None and conta_id_final is None and cruzamento['status'] != 'modo_legado':
+                continue
+
             unidade_info = next((u for u in CFG['unidades'] if u['id'] == uid), None) if uid else None
             marca   = unidade_info['marca']        if unidade_info else 'N/D'
             unidade = unidade_info['desc_unidade'] if unidade_info else 'N/D'
+
+            # Em modo_legado, preserva o comportamento v8 de consultar doc_verificados
+            # apenas para o cálculo de confiabilidade da unidade (classificar).
+            unit_conf_para_classificar      = 100 if rastreab != 'BAIXA' else conf_nome
+            unit_confirmada_para_classificar = (rastreab != 'BAIXA' or
+                                                 bool(SESSION['doc_verificados'].get(fn)))
 
             df = ler_df(arq['path'], fn)
             if df.empty: continue
@@ -1056,8 +1524,14 @@ def processar():
                               if p and p.lower() not in ('nan','none','desconhecido','')]
                     if partes: descricao_raw = ' | '.join(partes)
 
+                if inv.get('Data'):
+                    data_iso, data_raw = parse_data(rd.get(inv['Data']), preservar_raw=True)
+                else:
+                    data_iso, data_raw = None, ''
+
                 row_norm = {
-                    'Data':         parse_data(rd.get(inv['Data'])) if inv.get('Data') else None,
+                    'Data':         data_iso,
+                    'Data_Raw':     data_raw,
                     'Valor':        valor_abs,
                     'Tipo':         tipo,
                     'Descricao':    descricao_raw,
@@ -1067,10 +1541,21 @@ def processar():
                     'Centro_Custo': str(rd.get(inv['Centro_Custo'], '') if inv.get('Centro_Custo') else '').strip(),
                 }
 
-                grupo, conf, issues = classificar(row_norm, confianca, bool(confirmada_id))
+                grupo, conf, issues = classificar(row_norm, unit_conf_para_classificar,
+                                                   unit_confirmada_para_classificar)
+                # v9: anexa issue de rastreabilidade ao lançamento quando aplicável.
+                if cruzamento.get('issue') and cruzamento['issue'] not in issues:
+                    issues.append(cruzamento['issue'])
+                    if grupo == 'A':
+                        grupo = 'B'
+                        conf  = 'BAIXA' if conf == 'ALTA' else conf
+
                 todos.append({
                     'id': f"{fn}::{i}", 'arquivo': fn,
                     'unidade_id': uid or '', 'marca': marca, 'unidade': unidade,
+                    'conta_id': conta_id_final,
+                    'metodo_atribuicao': metodo_atrib,
+                    'Confiab_Rastreabilidade': rastreab,
                     'grupo': grupo, 'confiabilidade': conf, 'issues': issues,
                     'tipo_conf': tipo_conf, 'status': 'pendente',
                     **row_norm, 'extras': extras,
@@ -1090,11 +1575,63 @@ def processar():
     if erros_arquivos:
         resp['erros'] = erros_arquivos
         resp['msg'] = f'{len(erros_arquivos)} arquivo(s) com erro: {", ".join(erros_arquivos)}'
+    if SESSION['arquivos_bloqueados']:
+        resp['bloqueados'] = SESSION['arquivos_bloqueados']
+        nomes = ', '.join(b['filename'] for b in SESSION['arquivos_bloqueados'])
+        resp['msg'] = (
+            f"{len(SESSION['arquivos_bloqueados'])} arquivo(s) bloqueado(s) por "
+            f"conflito/ausência de identificação: {nomes}. "
+            f"Resolva em 'Verificação' antes de reprocessar."
+        )
     return jsonify(resp)
 
 @app.route('/api/progresso')
 def progresso():
     return jsonify(SESSION['progresso'])
+
+
+@app.route('/api/resultado')
+def resultado():
+    """Snapshot do estado pós-processamento, lido de SESSION.
+
+    Existe para client-side recovery: quando o POST /api/processar perde
+    a conexão (timeout do proxy do PaaS), o worker continua até concluir
+    e grava em SESSION. O frontend então pega tudo aqui.
+    """
+    todos     = SESSION['lancamentos']
+    prog      = SESSION['progresso']
+    concluido = (prog.get('pct', 0) >= 100) and (not prog.get('ativo', False))
+    return jsonify({
+        'ok':         True,
+        'concluido':  concluido,
+        'ativo':      bool(prog.get('ativo', False)),
+        'progresso':  prog,
+        'total':      len(todos),
+        'grupo_a':    sum(1 for l in todos if l.get('grupo') == 'A'),
+        'grupo_b':    sum(1 for l in todos if l.get('grupo') == 'B'),
+        'schema_map': {k: v for k, v in SESSION['schema_map'].items() if v},
+        'bloqueados': SESSION.get('arquivos_bloqueados', []),
+        'processado': SESSION.get('processado', False),
+    })
+
+
+@app.route('/api/info')
+def info():
+    """Metadados de runtime que o frontend lê na boot.
+
+    Permite o UI exibir limites/capacidades reais em vez de hardcoded,
+    e particionar uploads de acordo com `max_batch_mb`. Também aciona a
+    coleta lazy de sessões antigas em `_SESSIONS_STORE` (cheap: roda só
+    quando uma página é aberta).
+    """
+    _cleanup_sessoes_velhas()
+    return jsonify({
+        'max_upload_mb':     MAX_UPLOAD_MB,
+        'max_batch_mb':      MAX_BATCH_MB,
+        'upload_ttl_horas':  UPLOAD_TTL_HORAS,
+        'has_pdf_extractor': HAS_PDF_EXTRACTOR,
+        'extensoes':         sorted(ALLOWED_EXT),
+    })
 
 
 # ============================================================
@@ -1294,11 +1831,43 @@ def gate(step):
         ok = len(SESSION['arquivos']) > 0
         return jsonify({'ok': ok, 'msg': '' if ok else 'Faça upload de pelo menos 1 arquivo'})
     if step == 2:
-        sem = [a['filename'] for a in SESSION['arquivos']
-               if not SESSION['doc_verificados'].get(a['filename'])
-               and encontrar_unidade(a['filename'])[1] < 80]
-        return jsonify({'ok': True, 'pendentes': sem,
-                        'msg': f'{len(sem)} arquivo(s) sem unidade confirmada' if sem else ''})
+        modo_legado = not CFG.get('contas_bancarias')
+        pendentes = []
+        contas_cfg = CFG.get('contas_bancarias', [])
+        for a in SESSION['arquivos']:
+            fn = a['filename']
+            # Garante detecção/cruzamento antes de avaliar.
+            deteccao = SESSION['deteccao_cab'].get(fn)
+            if deteccao is None:
+                deteccao = detectar_cabecalho(a['path'], fn)
+                SESSION['deteccao_cab'][fn] = deteccao
+            conta_id_cab, _, _ = (resolver_conta(deteccao, contas_cfg)
+                                   if deteccao else (None, 0, 'sem_cabecalho'))
+            uid_nome, conf_nome, _ = encontrar_unidade(fn)
+            unit_id_nome = uid_nome if conf_nome >= 80 else None
+            cruz = validar_cruzado(conta_id_cab, unit_id_nome, contas_cfg)
+            SESSION['cruzamento'][fn] = cruz
+
+            liberado = (
+                cruz['status'] in ('concordam', 'apenas_cabecalho') or
+                bool(SESSION['conta_por_arquivo'].get(fn)) or
+                cruz['status'] == 'modo_legado' or
+                # legacy v8: aceita confirmação de unidade pela UI antiga
+                (modo_legado and (SESSION['doc_verificados'].get(fn) or conf_nome >= 80))
+            )
+            if not liberado:
+                pendentes.append({
+                    'filename': fn,
+                    'status':   cruz['status'],
+                    'msg':      cruz.get('issue'),
+                })
+
+        msg = ''
+        if pendentes:
+            msg = (f"{len(pendentes)} arquivo(s) com conta não resolvida — "
+                   f"resolva conflitos ou cadastre contas antes de processar.")
+        return jsonify({'ok': True, 'pendentes': pendentes, 'msg': msg,
+                        'modo_legado': modo_legado})
     if step == 3:
         ok = SESSION['processado'] and len(SESSION['lancamentos']) > 0
         return jsonify({'ok': ok, 'msg': '' if ok else 'Execute o processamento primeiro'})
@@ -1343,14 +1912,18 @@ DICT_COLUNAS = [
     ("Grupo","PROCESSAMENTO","A = todos os campos ok e unidade identificada. B = revisão humana.","A | B"),
     ("Confiabilidade","PROCESSAMENTO","Grau de confiança do processamento automático.","ALTA | MÉDIA | BAIXA"),
     ("Status","PROCESSAMENTO","Estado final após o ciclo de validação.","confirmado | pendente | excluido"),
-    ("Issues","PROCESSAMENTO","Motivos que levaram ao Grupo B. Vazio para Grupo A.","data_ausente | valor_ausente | descricao_ausente | tipo_indefinido | unidade_incerta"),
+    ("Issues","PROCESSAMENTO","Motivos que levaram ao Grupo B. Vazio para Grupo A.","data_ausente | valor_ausente | descricao_ausente | tipo_indefinido | unidade_incerta | data_invalida | conflito_cabecalho_nome_arquivo | conta_nao_identificada"),
     ("ID","PROCESSAMENTO","Identificador único gerado pelo sistema. Formato: arquivo::linha.","Permite rastrear a linha exata no arquivo original."),
+    ("Conta_Id","PROCESSAMENTO","ID da conta bancária resolvida a partir do cabeçalho do arquivo.","Referência para tabela-mãe de contas. Vazio em modo_legado."),
+    ("Metodo_Atribuicao","PROCESSAMENTO","Como a conta/unidade foi atribuída (para auditoria).","cabecalho+arquivo_concordam | cabecalho_sem_confirmacao_nome | conflito_resolvido_manual | apenas_nome_confirmado_manual | modo_legado"),
+    ("Confiab_Rastreabilidade","PROCESSAMENTO","Grau de confiança da atribuição da CONTA (distinta de Confiabilidade do lançamento).","ALTA: cabeçalho identificou sem conflito. MEDIA: resolvido manualmente pelo operador. BAIXA: modo_legado ou não identificado."),
 ]
 
 COL_WIDTHS = {
-    'Data':18,'Valor':14,'Tipo':12,'Descricao':38,'Conta':16,'Banco':28,
+    'Data':18,'Data_Raw':18,'Valor':14,'Tipo':12,'Descricao':38,'Conta':16,'Banco':28,
     'CNPJ':20,'Centro_Custo':18,'Marca':14,'Unidade':20,'Arquivo':38,
     'Grupo':10,'Confiabilidade':16,'Status':14,'Issues':40,'ID':42,
+    'Conta_Id':18,'Metodo_Atribuicao':34,'Confiab_Rastreabilidade':14,
 }
 
 
@@ -1371,8 +1944,17 @@ def _build_excel(ls: list, depara_cfg: dict, sumario_rows: list) -> io.BytesIO:
     wb = Workbook()
     wb.remove(wb.active)
 
-    COLS_ORIGEM_BASE = ['Data','Valor','Tipo','Descricao','Conta','Banco','CNPJ','Centro_Custo']
-    COLS_PROC        = ['Marca','Unidade','Arquivo','Grupo','Confiabilidade','Status','Issues','ID']
+    # Só expõe Data_Raw se houver data_invalida em algum lançamento —
+    # caso contrário a coluna fica sempre vazia e só polui a planilha.
+    has_data_invalida = any('data_invalida' in l.get('issues', []) for l in ls)
+    COLS_ORIGEM_BASE = (
+        ['Data','Data_Raw','Valor','Tipo','Descricao','Conta','Banco','CNPJ','Centro_Custo']
+        if has_data_invalida else
+        ['Data','Valor','Tipo','Descricao','Conta','Banco','CNPJ','Centro_Custo']
+    )
+    COLS_PROC = ['Marca','Unidade','Arquivo','Grupo','Confiabilidade',
+                 'Confiab_Rastreabilidade','Conta_Id','Metodo_Atribuicao',
+                 'Status','Issues','ID']
 
     extra_keys_all = {}
     for l in ls:
@@ -1474,7 +2056,19 @@ def _build_excel(ls: list, depara_cfg: dict, sumario_rows: list) -> io.BytesIO:
 
     # Dados
     KEY_MAP = {'Marca':'marca','Unidade':'unidade','Arquivo':'arquivo',
-               'Grupo':'grupo','Confiabilidade':'confiabilidade','Status':'status','ID':'id'}
+               'Grupo':'grupo','Confiabilidade':'confiabilidade','Status':'status','ID':'id',
+               'Conta_Id':'conta_id','Metodo_Atribuicao':'metodo_atribuicao',
+               'Confiab_Rastreabilidade':'Confiab_Rastreabilidade'}
+    # v9: índice por id para derivar a coluna 'Conta' a partir de contas_bancarias.
+    contas_idx = {c['id']: c for c in CFG.get('contas_bancarias', [])}
+
+    def _val_conta_origem(lanc):
+        cid = lanc.get('conta_id')
+        if cid and cid in contas_idx:
+            c = contas_idx[cid]
+            return c.get('conta') or lanc.get('Conta', '')
+        return lanc.get('Conta', '')
+
     for ri,l in enumerate(ls,start=3):
         for ci,cd in enumerate(cols_data,1):
             is_p=cd in COLS_PROC
@@ -1482,6 +2076,8 @@ def _build_excel(ls: list, depara_cfg: dict, sumario_rows: list) -> io.BytesIO:
                 val=(', '.join(l.get('issues',[])) if cd=='Issues' else l.get(KEY_MAP.get(cd,cd),''))
             elif cd in extra_keys:
                 val=l.get('extras',{}).get(cd)
+            elif cd == 'Conta':
+                val = _val_conta_origem(l)
             else:
                 val=l.get(cd)
             c=ws.cell(row=ri,column=ci)
@@ -1570,6 +2166,122 @@ def exportar():
 
 
 # ============================================================
+# ROTAS — CONTAS BANCÁRIAS (CRUD v9)
+# ============================================================
+
+_CAMPOS_CONTA_OBRIGATORIOS  = ('id', 'banco_nome', 'unit_id')
+_CAMPOS_CONTA_OPCIONAIS     = ('banco_codigo', 'agencia', 'conta', 'cnpj_titular',
+                               'ativo_desde', 'ativo_ate', 'observacao')
+
+
+def _validar_conta_payload(d: dict, criar: bool = True) -> tuple[bool, str | None]:
+    if criar:
+        for k in _CAMPOS_CONTA_OBRIGATORIOS:
+            if not d.get(k):
+                return False, f'Campo obrigatório ausente: {k}'
+    if d.get('unit_id') and not any(u['id'] == d['unit_id'] for u in CFG['unidades']):
+        return False, f"unit_id '{d['unit_id']}' não existe em unidades"
+    return True, None
+
+
+@app.route('/api/contas', methods=['GET', 'POST', 'PUT', 'DELETE'])
+def contas_bancarias():
+    """CRUD da tabela-mãe de contas bancárias. Persiste em config.json."""
+    if request.method == 'GET':
+        return jsonify({'contas': CFG.get('contas_bancarias', [])})
+
+    d = request.get_json() or {}
+
+    if request.method == 'POST':
+        ok, msg = _validar_conta_payload(d, criar=True)
+        if not ok:
+            return jsonify({'ok': False, 'msg': msg}), 400
+        if any(c['id'] == d['id'] for c in CFG['contas_bancarias']):
+            return jsonify({'ok': False, 'msg': 'ID já existe'}), 400
+        nova = {
+            'id':            d['id'],
+            'banco_nome':    d['banco_nome'],
+            'banco_codigo':  d.get('banco_codigo'),
+            'agencia':       d.get('agencia'),
+            'conta':         d.get('conta'),
+            'cnpj_titular':  d.get('cnpj_titular'),
+            'unit_id':       d['unit_id'],
+            'ativo_desde':   d.get('ativo_desde'),
+            'ativo_ate':     d.get('ativo_ate'),
+            'observacao':    d.get('observacao', ''),
+        }
+        CFG['contas_bancarias'].append(nova)
+        save_config(CFG)
+        return jsonify({'ok': True, 'contas': CFG['contas_bancarias']})
+
+    if request.method == 'PUT':
+        if not d.get('id'):
+            return jsonify({'ok': False, 'msg': 'id obrigatório'}), 400
+        ok, msg = _validar_conta_payload(d, criar=False)
+        if not ok:
+            return jsonify({'ok': False, 'msg': msg}), 400
+        for c in CFG['contas_bancarias']:
+            if c['id'] == d['id']:
+                for k in _CAMPOS_CONTA_OPCIONAIS + ('banco_nome', 'unit_id'):
+                    if k in d:
+                        c[k] = d[k]
+                save_config(CFG)
+                return jsonify({'ok': True, 'contas': CFG['contas_bancarias']})
+        return jsonify({'ok': False, 'msg': 'Conta não encontrada'}), 404
+
+    if request.method == 'DELETE':
+        before = len(CFG['contas_bancarias'])
+        CFG['contas_bancarias'] = [c for c in CFG['contas_bancarias'] if c['id'] != d.get('id')]
+        if len(CFG['contas_bancarias']) < before:
+            save_config(CFG)
+            return jsonify({'ok': True})
+        return jsonify({'ok': False, 'msg': 'Conta não encontrada'}), 404
+
+
+@app.route('/api/confirmar-conta', methods=['POST'])
+def confirmar_conta():
+    """Resolve manualmente a atribuição conta↔arquivo.
+
+    Body: { filename, conta_id, motivo }
+    - conta_id=None cancela a confirmação prévia.
+    - motivo é obrigatório quando o cruzamento atual é 'conflito' (escolha
+      que diverge do cabeçalho). Guardado em conta_por_arquivo_meta.
+    """
+    d = request.get_json() or {}
+    fn        = d.get('filename')
+    conta_id  = d.get('conta_id')
+    motivo    = (d.get('motivo') or '').strip()
+
+    if not fn:
+        return jsonify({'ok': False, 'msg': 'filename obrigatório'}), 400
+
+    if conta_id is None or conta_id == '':
+        SESSION['conta_por_arquivo'].pop(fn, None)
+        SESSION['conta_por_arquivo_meta'].pop(fn, None)
+        return jsonify({'ok': True, 'clearedfor': fn})
+
+    conta = next((c for c in CFG['contas_bancarias'] if c['id'] == conta_id), None)
+    if not conta:
+        return jsonify({'ok': False, 'msg': f"conta_id '{conta_id}' não cadastrada"}), 404
+
+    cruz = SESSION.get('cruzamento', {}).get(fn, {})
+    if cruz.get('status') == 'conflito' and not motivo:
+        return jsonify({
+            'ok': False,
+            'msg': 'Conflito cabeçalho×nome exige motivo por auditoria.'
+        }), 400
+
+    SESSION['conta_por_arquivo'][fn] = conta_id
+    SESSION['conta_por_arquivo_meta'][fn] = {
+        'metodo_original': cruz.get('metodo'),
+        'escolha_humana':  conta_id,
+        'motivo':          motivo,
+        'timestamp':       datetime.now().isoformat(timespec='seconds'),
+    }
+    return jsonify({'ok': True, 'conta_id': conta_id})
+
+
+# ============================================================
 # ROTAS — UNIDADES (CRUD)
 # ============================================================
 
@@ -1647,17 +2359,16 @@ def reset_depara():
 
 @app.route('/api/limpar', methods=['POST'])
 def limpar():
-    """Reinicia sessão e remove arquivos do disco. Preserva configurações."""
-    global SESSION
-    SESSION = {
-        'arquivos': [], 'lancamentos': [], 'schema_map': {},
-        'processado': False, 'doc_verificados': {}, 'previews': {},
-        'progresso': {'pct': 0, 'msg': '', 'ativo': False},
-    }
-    for f in UPLOAD_FOLDER.glob('*'):
-        try: f.unlink()
-        except: pass
-    return jsonify({'ok': True})
+    """Reinicia sessão e remove arquivos do disco. Preserva configurações.
+
+    Como `SESSION` agora é um LocalProxy, não pode ser reatribuído — muta
+    o dict subjacente in-place via clear()/update(). Preserva `.gitkeep`
+    em uploads/.
+    """
+    SESSION.clear()
+    SESSION.update(_nova_sessao())
+    removidos = _limpar_uploads_dir()
+    return jsonify({'ok': True, 'arquivos_removidos': removidos})
 
 
 # ============================================================

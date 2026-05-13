@@ -286,9 +286,15 @@ select,input[type=text],input[type=number]{font-family:inherit}
   </div>
 
   <div class="card" id="fileListCard" style="display:none">
-    <div class="section-header">
+    <div class="section-header" style="display:flex;justify-content:space-between;align-items:center;gap:12px;flex-wrap:wrap">
       <span class="section-title">Arquivos carregados</span>
-      <span class="section-count" id="fileCount">0 arquivo(s)</span>
+      <div style="display:flex;align-items:center;gap:10px;font-size:12px">
+        <label style="display:flex;align-items:center;gap:6px;cursor:pointer;user-select:none">
+          <input type="checkbox" id="chkSelTodos" onchange="toggleSelTodos(this.checked, 'lista')" checked>
+          Marcar todos
+        </label>
+        <span class="section-count" id="fileCount">0 arquivo(s)</span>
+      </div>
     </div>
     <div id="fileList"></div>
   </div>
@@ -313,6 +319,13 @@ select,input[type=text],input[type=number]{font-family:inherit}
       <strong>Modo legado v8 ativo</strong> — nenhuma conta bancária cadastrada.
       A atribuição continua baseada no nome do arquivo (Rastreab=BAIXA). Cadastre
       contas em <em>⚙ Configurações → Contas</em> para ativar o fluxo v9.
+    </div>
+    <div id="verifSelecaoBar" style="display:none;justify-content:space-between;align-items:center;gap:12px;padding:10px 12px;background:#F3F4F6;border-radius:6px;margin-bottom:12px;font-size:13px">
+      <label style="display:flex;align-items:center;gap:8px;cursor:pointer;user-select:none">
+        <input type="checkbox" id="chkSelTodosVerif" onchange="toggleSelTodos(this.checked, 'verif')">
+        <strong>Marcar todos</strong>
+      </label>
+      <span id="verifSelecaoCount" style="color:var(--muted)"></span>
     </div>
     <div id="verificacaoList"></div>
     <div id="verificacaoVazia" class="empty-state" style="display:none">
@@ -363,6 +376,8 @@ select,input[type=text],input[type=number]{font-family:inherit}
         </div>
       </div>
     </div>
+    <div id="selecionadosCount"
+         style="margin:8px 0 12px;font-size:13px;font-weight:600;color:var(--muted)"></div>
     <button class="btn btn-gold" id="btnProcessar" onclick="processar()" style="font-size:14px;padding:11px 24px">
       ▶ Iniciar Processamento
     </button>
@@ -910,6 +925,7 @@ function goTab(n) {
   }
   S.tab = n;
   if (n === 2) loadVerificacao();
+  if (n === 3) _atualizarContadorSelecao();
   if (n === 4) { loadGrupoA(); loadGrupoB(); loadGroupCounts(); loadBlocoResumo(); }
   if (n === 5) loadResumo();
   window.scrollTo(0, 0);
@@ -1065,6 +1081,7 @@ async function loadArquivos() {
   const r = await api('/api/arquivos');
   S.arquivos = r.arquivos || [];
   renderFileList();
+  _atualizarContadorSelecao();
 }
 
 function renderFileList() {
@@ -1073,9 +1090,22 @@ function renderFileList() {
   const count = document.getElementById('fileCount');
   if (!S.arquivos.length) { card.style.display = 'none'; return; }
   card.style.display = 'block';
-  count.textContent = `${S.arquivos.length} arquivo(s)`;
+  const sel = S.arquivos.filter(a => a.selecionado !== false).length;
+  count.textContent = `${sel}/${S.arquivos.length} marcados`;
+  // Estado do "marcar todos" (visual): todos marcados → checked; nenhum → unchecked;
+  // misto → indeterminate (caso usuário tenha marcado parcialmente).
+  const chk = document.getElementById('chkSelTodos');
+  if (chk) {
+    chk.checked = sel === S.arquivos.length;
+    chk.indeterminate = sel > 0 && sel < S.arquivos.length;
+  }
   list.innerHTML = S.arquivos.map(a => `
-    <div class="file-item">
+    <div class="file-item" style="opacity:${a.selecionado === false ? '.55' : '1'}">
+      <label style="display:flex;align-items:center;cursor:pointer;padding:0 4px 0 0">
+        <input type="checkbox"
+               ${a.selecionado === false ? '' : 'checked'}
+               onchange="toggleSelArquivo('${esc(a.filename)}', this.checked)">
+      </label>
       <span class="file-icon">📄</span>
       <div class="file-info">
         <div class="file-name">${a.filename}
@@ -1087,6 +1117,51 @@ function renderFileList() {
       <button class="btn btn-danger btn-sm" onclick="removerArquivo('${esc(a.filename)}')">✕</button>
     </div>
   `).join('');
+}
+
+
+// ========== SELEÇÃO DE ARQUIVOS (checkboxes) ==========
+async function toggleSelArquivo(filename, selecionado) {
+  // Otimismo: atualiza estado local antes do round-trip para feedback instantâneo.
+  const a = S.arquivos.find(x => x.filename === filename);
+  if (a) a.selecionado = selecionado;
+  renderFileList();
+  _atualizarContadorSelecao();
+  try {
+    await fetch('/api/arquivos/selecao', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ filenames: [filename], selecionado })
+    });
+  } catch (e) { /* mantém o otimismo; próximo loadArquivos reconcilia */ }
+}
+
+async function toggleSelTodos(selecionado, origem) {
+  // origem: 'lista' (Tab 1) ou 'verif' (Tab 2). Só usado para escolher onde refazer o render.
+  for (const a of S.arquivos) a.selecionado = selecionado;
+  if (origem === 'verif') {
+    loadVerificacao();
+  } else {
+    renderFileList();
+  }
+  _atualizarContadorSelecao();
+  try {
+    await fetch('/api/arquivos/selecao', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ all: true, selecionado })
+    });
+  } catch (e) { /* idem */ }
+}
+
+function _atualizarContadorSelecao() {
+  // Atualiza o resumo "X de Y selecionados" da Tab 3 se ela estiver montada.
+  const el = document.getElementById('selecionadosCount');
+  if (!el) return;
+  const total = S.arquivos.length;
+  const sel = S.arquivos.filter(a => a.selecionado !== false).length;
+  el.textContent = `${sel} de ${total} arquivo(s) selecionado(s) para processar`;
+  el.style.color = sel === 0 ? '#B91C1C' : (sel < total ? '#92400E' : '#065F46');
 }
 
 async function loadPreview(fn) {
@@ -1121,15 +1196,36 @@ async function loadVerificacao() {
   const vazia = document.getElementById('verificacaoVazia');
   const lista = document.getElementById('verificacaoList');
   const legadoBlock = document.getElementById('verifModoLegado');
+  const selBar = document.getElementById('verifSelecaoBar');
+  const selCount = document.getElementById('verifSelecaoCount');
+  const chkAll = document.getElementById('chkSelTodosVerif');
 
   legadoBlock.style.display = r.modo_legado ? 'block' : 'none';
 
   if (!docs.length) {
-    vazia.style.display='block'; lista.innerHTML=''; return;
+    vazia.style.display='block'; lista.innerHTML='';
+    selBar.style.display = 'none';
+    return;
   }
   vazia.style.display='none';
 
+  // Sincroniza estado de seleção em S.arquivos (fonte das checkboxes da Tab 1)
+  // com o que o backend reportou em /api/verificar-documentos.
+  for (const d of docs) {
+    const a = S.arquivos.find(x => x.filename === d.filename);
+    if (a) a.selecionado = (d.selecionado !== false);
+  }
+
+  const selN = docs.filter(d => d.selecionado !== false).length;
+  selBar.style.display = 'flex';
+  selCount.textContent = `${selN}/${docs.length} marcado(s) para processar`;
+  if (chkAll) {
+    chkAll.checked = selN === docs.length;
+    chkAll.indeterminate = selN > 0 && selN < docs.length;
+  }
+
   lista.innerHTML = docs.map(doc => renderVerifCard(doc, r.modo_legado)).join('');
+  _atualizarContadorSelecao();
 }
 
 function bannerMsg(cruz, modoLegado) {
@@ -1204,10 +1300,15 @@ function renderVerifCard(doc, modoLegado) {
     ? `<div style="font-size:11px;color:#065F46;margin-top:4px">✓ Confirmada manualmente: ${doc.confirmacao}</div>`
     : '';
 
+  const selecionado = doc.selecionado !== false;
   return `
-    <div class="verif-card" id="vcard-${esc(fn)}">
+    <div class="verif-card" id="vcard-${esc(fn)}" style="opacity:${selecionado ? '1' : '.55'}">
       <div class="verif-banner ${modoLegado ? 'modo_legado' : cruz.status}">
-        ${bannerMsg(cruz, modoLegado)}
+        <label style="display:flex;align-items:center;gap:8px;cursor:pointer;user-select:none;margin-right:auto">
+          <input type="checkbox" ${selecionado ? 'checked' : ''}
+                 onchange="toggleSelArquivo('${esc(fn)}', this.checked); loadVerificacao()">
+          <span>${bannerMsg(cruz, modoLegado)}</span>
+        </label>
       </div>
       <div class="verif-body">
         <div class="verif-col">

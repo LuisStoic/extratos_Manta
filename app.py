@@ -1108,7 +1108,8 @@ def upload():
                              'motivo': f'Conteúdo idêntico ao arquivo "{hashes_existentes[file_hash]}"'})
             continue
         entry = {'filename': fn, 'size': fp.stat().st_size,
-                 'path': str(fp), 'hash': file_hash}
+                 'path': str(fp), 'hash': file_hash,
+                 'selecionado': True}
         SESSION['arquivos'].append(entry)
         uploaded.append(entry)
         nomes_existentes.add(fn)
@@ -1119,7 +1120,45 @@ def upload():
 
 @app.route('/api/arquivos')
 def listar_arquivos():
+    # Backfill defensivo: arquivos enviados antes deste deploy não têm
+    # o campo 'selecionado'. Trata ausente como True para preservar
+    # comportamento anterior.
+    for a in SESSION['arquivos']:
+        a.setdefault('selecionado', True)
     return jsonify({'arquivos': SESSION['arquivos']})
+
+
+@app.route('/api/arquivos/selecao', methods=['POST'])
+def atualizar_selecao_arquivos():
+    """Marca/desmarca arquivos para inclusão no /api/processar.
+
+    Body aceita duas formas:
+      {"all": true,  "selecionado": true|false}   → aplica a todos
+      {"filenames": ["a.csv","b.xlsx"], "selecionado": true|false}
+
+    Retorna a lista atualizada e o resumo de quantos estão selecionados.
+    """
+    d = request.get_json(silent=True) or {}
+    novo = bool(d.get('selecionado', True))
+    afetados = 0
+    if d.get('all'):
+        for a in SESSION['arquivos']:
+            a['selecionado'] = novo
+            afetados += 1
+    else:
+        alvo = set(d.get('filenames') or [])
+        for a in SESSION['arquivos']:
+            if a['filename'] in alvo:
+                a['selecionado'] = novo
+                afetados += 1
+    sel = sum(1 for a in SESSION['arquivos'] if a.get('selecionado', True))
+    return jsonify({
+        'ok':           True,
+        'afetados':     afetados,
+        'selecionados': sel,
+        'total':        len(SESSION['arquivos']),
+        'arquivos':     SESSION['arquivos'],
+    })
 
 @app.route('/api/pdf-warnings')
 def pdf_warnings():
@@ -1196,8 +1235,9 @@ def verificar_documentos():
         meta_conf   = SESSION['conta_por_arquivo_meta'].get(fn)
 
         documentos.append({
-            'filename': fn,
-            'preview':  SESSION['previews'].get(fn, {}),
+            'filename':    fn,
+            'selecionado': arq.get('selecionado', True),
+            'preview':     SESSION['previews'].get(fn, {}),
             'cabecalho': {
                 'banco_detectado': deteccao.get('banco_detectado') if deteccao else None,
                 'banco_codigo':    deteccao.get('banco_codigo')    if deteccao else None,
@@ -1374,6 +1414,15 @@ def processar():
                 'progresso': SESSION['progresso'],
             }), 409
 
+    # Filtra apenas arquivos marcados para processar. O default é True
+    # para preservar comportamento anterior (uploads antigos sem o campo).
+    arquivos_a_processar = [a for a in SESSION['arquivos']
+                            if a.get('selecionado', True)]
+    if not arquivos_a_processar:
+        return jsonify({'ok': False,
+                        'msg': 'Nenhum arquivo selecionado para processar. '
+                               'Marque ao menos um na lista.'}), 400
+
     SESSION['progresso'] = {
         'pct': 2, 'msg': 'Detectando schema...', 'ativo': True,
         'started_at': time.time(),
@@ -1382,7 +1431,7 @@ def processar():
     # Passo 1: schema global (usa o arquivo com mais anchors obrigatórios como referência)
     all_file_schemas = {}
     richest_cols, richest_score = [], 0
-    for arq in SESSION['arquivos']:
+    for arq in arquivos_a_processar:
         df = ler_df(arq['path'], arq['filename'])
         if df.empty: continue
         cols  = list(df.columns)
@@ -1404,7 +1453,7 @@ def processar():
 
     # Passo 2: processamento linha a linha
     todos = []
-    total = len(SESSION['arquivos'])
+    total = len(arquivos_a_processar)
 
     # v9: estado de detecção e bloqueios por arquivo é reiniciado a cada processar().
     SESSION['deteccao_cab'] = {}
@@ -1412,7 +1461,7 @@ def processar():
     SESSION['arquivos_bloqueados'] = []
 
     erros_arquivos = []
-    for idx, arq in enumerate(SESSION['arquivos']):
+    for idx, arq in enumerate(arquivos_a_processar):
         fn  = arq['filename']
         pct = 5 + int((idx / total) * 90)
         SESSION['progresso'] = {'pct': pct, 'msg': f'Processando {fn} ({idx+1}/{total})...', 'ativo': True}

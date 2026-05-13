@@ -7,7 +7,8 @@ ofxparse>=0.21
 xlrd>=2.0
 # PDF extraction — pdfplumber é suficiente para a maioria dos PDFs
 pdfplumber>=0.11
-# pymupdf é fallback opcional (requer compilação C, pode falhar em PaaS)
-# Instale manualmente se necessário: pip install pymupdf
-# pytesseract e pdf2image requerem Tesseract instalado no SO
+# Fallbacks pesados (pymupdf, pytesseract, pdf2image) ficam em
+# requirements-ocr.txt — exigem compilação C e binários do SO
+# (Tesseract + Poppler). Instale só se precisar de PDF escaneado:
+#     pip install -r requirements-ocr.txt
 

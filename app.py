@@ -1017,6 +1017,12 @@ def upload():
                              'motivo': 'Arquivo já carregado nesta sessão (mesmo nome)'})
             continue
         fp = UPLOAD_FOLDER / fn
+        # Colisão no disco (sessão anterior ainda não limpa, crash, etc.):
+        # adiciona sufixo timestamp em vez de sobrescrever silenciosamente.
+        if fp.exists():
+            stamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+            fn = f"{Path(fn).stem}_{stamp}{Path(fn).suffix}"
+            fp = UPLOAD_FOLDER / fn
         f.save(fp)
         file_hash = _md5(fp)
         if file_hash in hashes_existentes:

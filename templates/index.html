@@ -185,6 +185,29 @@ tr:hover td{background:#FAFBFD}
 .proc-banner-warn{margin-left:auto;font-size:12px;color:#FCD34D;font-weight:500}
 body.proc-active{padding-top:42px}
 
+/* Bloco "O que fazer nesta etapa" — guia rápido por aba (colapsável) */
+.step-help{background:#F0F9FF;border-left:4px solid #0EA5E9;border-radius:0 6px 6px 0;padding:0;margin-bottom:14px;font-size:13px;overflow:hidden}
+.step-help summary{padding:10px 14px;cursor:pointer;font-weight:600;color:#0C4A6E;list-style:none;display:flex;align-items:center;gap:8px;user-select:none}
+.step-help summary::-webkit-details-marker{display:none}
+.step-help summary::before{content:'▶';font-size:9px;transition:transform .15s}
+.step-help[open] summary::before{transform:rotate(90deg)}
+.step-help-body{padding:0 14px 12px;color:#1E3A5F;line-height:1.55}
+.step-help-body strong{color:#0C4A6E}
+.step-help-body ul{margin:4px 0 8px 18px;padding:0}
+.step-help-body li{margin:3px 0}
+.step-help-body .req{color:#065F46}
+.step-help-body .opt{color:#92400E}
+
+/* Bloco persistente "Upload concluído" — confirma que pode avançar */
+.upload-concluido{display:none;align-items:center;gap:10px;padding:12px 14px;background:#D1FAE5;border-left:4px solid #10B981;border-radius:0 6px 6px 0;margin-bottom:14px;font-size:13px;color:#065F46}
+.upload-concluido.open{display:flex}
+.upload-concluido strong{color:#064E3B}
+.upload-concluido .check{font-size:18px;line-height:1}
+
+/* Badges de preview mais claras */
+.badge-pendente{background:#F3F4F6;color:#6B7280;border:1px solid #E5E7EB}
+.badge-indisponivel{background:#FEF3C7;color:#92400E;border:1px solid #FDE68A}
+
 /* Empty state */
 .empty-state{text-align:center;padding:48px 24px;color:var(--muted)}
 .empty-state-icon{font-size:40px;margin-bottom:12px}
@@ -269,6 +292,29 @@ select,input[type=text],input[type=number]{font-family:inherit}
 <!-- ===== TAB 1: UPLOAD ===== -->
 <div id="tab1" class="tab-content active">
   <div id="alert1" class="alert"></div>
+
+  <details class="step-help" open>
+    <summary>O que fazer nesta etapa</summary>
+    <div class="step-help-body">
+      <strong class="req">Necessário:</strong>
+      <ul>
+        <li>Adicionar arquivos arrastando ou clicando na área de upload.</li>
+        <li>Aguardar a <strong>confirmação verde "Upload concluído"</strong> aparecer abaixo. Só depois disso siga para Verificação.</li>
+        <li>Manter marcado (<strong>☑</strong>) cada arquivo que deve entrar no processamento. Use <em>Marcar/Desmarcar todos</em> para agilizar.</li>
+      </ul>
+      <strong class="opt">Opcional:</strong>
+      <ul>
+        <li><strong>↻ Preview</strong>: visualiza linhas e totais sem rodar o processamento. <em>Não é obrigatório</em> — serve só para conferência prévia. Se aparecer "preview indisponível" no PDF, o arquivo continua válido para processar.</li>
+        <li><strong>✕</strong>: remove o arquivo do servidor permanentemente (descarta). Se só quer pular o arquivo desta rodada, desmarque-o em vez de remover.</li>
+      </ul>
+    </div>
+  </details>
+
+  <div id="uploadConcluido" class="upload-concluido">
+    <span class="check">✓</span>
+    <span><strong id="uploadConcluidoN">0</strong> arquivo(s) carregado(s) — pronto(s) para a próxima etapa. Marque (☑) os que vão entrar no processamento e clique em <strong>Próxima: Verificação →</strong>.</span>
+  </div>
+
   <div class="card">
     <div class="upload-zone" id="uploadZone">
       <div class="upload-icon">📂</div>
@@ -288,12 +334,10 @@ select,input[type=text],input[type=number]{font-family:inherit}
   <div class="card" id="fileListCard" style="display:none">
     <div class="section-header" style="display:flex;justify-content:space-between;align-items:center;gap:12px;flex-wrap:wrap">
       <span class="section-title">Arquivos carregados</span>
-      <div style="display:flex;align-items:center;gap:10px;font-size:12px">
-        <label style="display:flex;align-items:center;gap:6px;cursor:pointer;user-select:none">
-          <input type="checkbox" id="chkSelTodos" onchange="toggleSelTodos(this.checked, 'lista')" checked>
-          Marcar todos
-        </label>
-        <span class="section-count" id="fileCount">0 arquivo(s)</span>
+      <div style="display:flex;align-items:center;gap:6px;font-size:12px;flex-wrap:wrap">
+        <button class="btn btn-ghost btn-sm" onclick="toggleSelTodos(true, 'lista')" title="Marca todos os arquivos para entrar no processamento">☑ Marcar todos</button>
+        <button class="btn btn-ghost btn-sm" onclick="toggleSelTodos(false, 'lista')" title="Desmarca todos — nenhum arquivo será processado até você marcar novamente">☐ Desmarcar todos</button>
+        <span class="section-count" id="fileCount" style="margin-left:6px">0 arquivo(s)</span>
       </div>
     </div>
     <div id="fileList"></div>
@@ -308,24 +352,45 @@ select,input[type=text],input[type=number]{font-family:inherit}
 <!-- ===== TAB 2: VERIFICAÇÃO ===== -->
 <div id="tab2" class="tab-content">
   <div id="alert2" class="alert"></div>
+
+  <details class="step-help" open>
+    <summary>O que fazer nesta etapa</summary>
+    <div class="step-help-body">
+      <p>Para cada arquivo, a aplicação tenta identificar a unidade de duas formas:
+        <strong>cabeçalho do extrato</strong> (banco/agência/conta lidos das primeiras linhas)
+        e <strong>nome do arquivo</strong> (fuzzy match com unidades cadastradas).
+        Os dois resultados são comparados em um banner colorido.</p>
+      <strong class="req">Necessário:</strong>
+      <ul>
+        <li>Banners <span style="color:#7F1D1D">vermelhos</span> ou <span style="color:#78350F">amarelos</span>: leia o conflito e <strong>escolha qual identificação usar</strong> (cabeçalho costuma ser o correto). Sem decisão, o arquivo é bloqueado no Processamento.</li>
+        <li>Banners <span style="color:#1E3A5F">azuis</span> ("apenas cabeçalho") ou <span style="color:#065F46">verdes</span> ("concordam"): não exigem ação — só conferir.</li>
+        <li>Manter marcado (☑) cada arquivo que vai entrar no processamento.</li>
+      </ul>
+      <strong class="opt">Opcional:</strong>
+      <ul>
+        <li><strong>↻ Preview</strong>: confere linhas e totais antes de processar.</li>
+        <li><strong>✕ Remover</strong>: descarta o arquivo do servidor. Para só pulá-lo nesta rodada, prefira <em>desmarcar</em>.</li>
+      </ul>
+    </div>
+  </details>
+
   <div class="card">
-    <div class="info-block" id="verifInfoBlock">
-      <strong>Identificação cruzada (v9):</strong> para cada arquivo, o sistema compara
-      o que foi identificado no <strong>cabeçalho do arquivo</strong> (fonte primária)
-      com a <strong>sugestão pelo nome do arquivo</strong> (controle secundário).
-      Conflitos bloqueiam o processamento até você decidir.
-    </div>
     <div class="warn-block" id="verifModoLegado" style="display:none">
-      <strong>Modo legado v8 ativo</strong> — nenhuma conta bancária cadastrada.
-      A atribuição continua baseada no nome do arquivo (Rastreab=BAIXA). Cadastre
-      contas em <em>⚙ Configurações → Contas</em> para ativar o fluxo v9.
+      <strong>📋 Modo Simplificado ativo</strong> (sem contas bancárias cadastradas).<br>
+      A aplicação está identificando a unidade só pelo <strong>nome do arquivo</strong>.
+      Isso funciona, mas a qualidade depende de você ter nomeado os arquivos de forma
+      consistente, e os lançamentos saem com rastreabilidade BAIXA no Excel exportado.
+      <br><br>
+      <strong>Recomendado:</strong> cadastre cada conta (banco + agência + conta + CNPJ → unidade)
+      em <em>⚙ Configurações → Contas Bancárias</em>. Aí a identificação passa a vir do
+      próprio extrato, de forma confiável, e a rastreabilidade sobe para ALTA.
     </div>
-    <div id="verifSelecaoBar" style="display:none;justify-content:space-between;align-items:center;gap:12px;padding:10px 12px;background:#F3F4F6;border-radius:6px;margin-bottom:12px;font-size:13px">
-      <label style="display:flex;align-items:center;gap:8px;cursor:pointer;user-select:none">
-        <input type="checkbox" id="chkSelTodosVerif" onchange="toggleSelTodos(this.checked, 'verif')">
-        <strong>Marcar todos</strong>
-      </label>
-      <span id="verifSelecaoCount" style="color:var(--muted)"></span>
+    <div id="verifSelecaoBar" style="display:none;justify-content:space-between;align-items:center;gap:12px;padding:10px 12px;background:#F3F4F6;border-radius:6px;margin-bottom:12px;font-size:13px;flex-wrap:wrap">
+      <div style="display:flex;gap:6px;align-items:center;flex-wrap:wrap">
+        <button class="btn btn-ghost btn-sm" onclick="toggleSelTodos(true, 'verif')">☑ Marcar todos</button>
+        <button class="btn btn-ghost btn-sm" onclick="toggleSelTodos(false, 'verif')">☐ Desmarcar todos</button>
+      </div>
+      <span id="verifSelecaoCount" style="color:var(--muted);font-weight:600"></span>
     </div>
     <div id="verificacaoList"></div>
     <div id="verificacaoVazia" class="empty-state" style="display:none">
@@ -343,6 +408,31 @@ select,input[type=text],input[type=number]{font-family:inherit}
 <!-- ===== TAB 3: PROCESSAR ===== -->
 <div id="tab3" class="tab-content">
   <div id="alert3" class="alert"></div>
+
+  <details class="step-help" open>
+    <summary>O que fazer nesta etapa</summary>
+    <div class="step-help-body">
+      <p>Aqui a aplicação lê cada arquivo marcado, identifica a unidade,
+        normaliza colunas para o schema-padrão (Data, Valor, Descrição, Tipo)
+        e classifica cada lançamento como <strong>Grupo A</strong> (pronto) ou
+        <strong>Grupo B</strong> (precisa de revisão).</p>
+      <strong class="req">Necessário:</strong>
+      <ul>
+        <li>Confirmar que o contador acima do botão mostra ao menos <strong>1 arquivo selecionado</strong>. Se mostrar zero, volte e marque na Tab 1 ou 2.</li>
+        <li>Clicar <strong>▶ Iniciar Processamento</strong> e aguardar. <em>Não feche a aba enquanto o banner azul do topo estiver visível</em> — pode levar minutos para muitos arquivos.</li>
+      </ul>
+      <strong class="opt">Opcional:</strong>
+      <ul>
+        <li><strong>Filtrar por mês/ano</strong>: processa só lançamentos do período. Default é "todos".</li>
+      </ul>
+      <p style="margin-top:8px;color:#92400E"><strong>O que esperar:</strong>
+        ao terminar, a tela mostra <em>quantos lançamentos foram para o Grupo A</em>
+        (prontos para exportar) e <em>quantos para o Grupo B</em>
+        (precisam de revisão na próxima etapa). Mapeamento de colunas detectado
+        também aparece para conferência.</p>
+    </div>
+  </details>
+
   <div class="card">
     <h2 style="font-size:16px;font-weight:700;color:var(--navy);margin-bottom:16px">Configurações de processamento</h2>
     <div class="warn-block" id="warnPendentes" style="display:none">
@@ -417,6 +507,38 @@ select,input[type=text],input[type=number]{font-family:inherit}
 <!-- ===== TAB 4: REVISÃO ===== -->
 <div id="tab4" class="tab-content">
   <div id="alert4" class="alert"></div>
+
+  <details class="step-help" open>
+    <summary>O que fazer nesta etapa</summary>
+    <div class="step-help-body">
+      <p>Os lançamentos foram separados em dois grupos:</p>
+      <ul>
+        <li><strong style="color:#065F46">Grupo A — Confiável</strong>: tem
+          data, valor, descrição e unidade. Pode ir direto para a exportação.
+          Útil dar uma olhada por amostragem para conferir.</li>
+        <li><strong style="color:#92400E">Grupo B — Revisão humana</strong>:
+          algum campo está faltando ou inválido (data ruim, valor zero,
+          descrição vazia, unidade incerta…). Esses lançamentos <em>não
+          entram no Excel</em> até serem resolvidos.</li>
+      </ul>
+      <strong class="req">Necessário:</strong>
+      <ul>
+        <li>Resolver os itens do Grupo B: para cada um, clicar em
+          <strong>✓ Confirmar</strong> (mantém como está),
+          <strong>✕ Excluir</strong> (descarta este lançamento) ou
+          <strong>✎ Editar</strong> (corrige o campo faltante).
+          Itens não resolvidos ficam de fora do Excel.</li>
+      </ul>
+      <strong class="opt">Opcional:</strong>
+      <ul>
+        <li><strong>Ações em lote</strong> no Grupo B: confirmar/excluir
+          subgrupos homogêneos por tipo de problema, por arquivo ou por
+          unidade — economiza cliques quando há muita repetição.</li>
+        <li><strong>✓ Confirmar todos A</strong>: marca todos do Grupo A
+          como prontos de uma vez.</li>
+      </ul>
+    </div>
+  </details>
 
   <div class="group-tab-nav">
     <button class="group-tab-btn active" id="gtbA" onclick="switchGroupTab('A')">
@@ -558,6 +680,32 @@ select,input[type=text],input[type=number]{font-family:inherit}
 <!-- ===== TAB 5: EXPORTAR ===== -->
 <div id="tab5" class="tab-content">
   <div id="alert5" class="alert"></div>
+
+  <details class="step-help" open>
+    <summary>O que fazer nesta etapa</summary>
+    <div class="step-help-body">
+      <p>Última etapa. O Excel gerado tem quatro abas: <strong>Dados</strong>
+        (todos os lançamentos consolidados), <strong>De-Para</strong>
+        (mapeamento de colunas detectado por arquivo), <strong>Resumo</strong>
+        (entradas, saídas, saldo, contagem) e <strong>Legenda</strong>
+        (descrição dos campos).</p>
+      <strong class="req">Necessário:</strong>
+      <ul>
+        <li>Conferir os totais no resumo abaixo (Total, Grupo A, Grupo B, Confirmados, Excluídos, Pendentes).</li>
+        <li>Clicar em <strong>📥 Exportar para Excel</strong>.
+          O arquivo gerado é <code>BD_Extratos_AAAAMMDD_HHMM.xlsx</code>.
+          <em>Lançamentos do Grupo B não-resolvidos ficam de fora.</em></li>
+      </ul>
+      <strong class="opt">Opcional:</strong>
+      <ul>
+        <li>Voltar à Revisão para resolver itens pendentes antes de exportar
+          (eles aparecem na contagem "Pendentes" deste resumo).</li>
+        <li>Após exportar, clicar em <strong>↺ Recomeçar</strong> no topo da
+          página para limpar a sessão e iniciar outra rodada.</li>
+      </ul>
+    </div>
+  </details>
+
   <div class="card">
     <h2 style="font-size:16px;font-weight:700;color:var(--navy);margin-bottom:16px">Resumo da sessão</h2>
     <div class="stats-grid" id="statsExport"></div>
@@ -996,6 +1144,8 @@ async function handleUpload() {
   const batches  = _chunkFiles(files, maxBytes);
 
   S.uploading = true;
+  // Esconde o "✓ Upload concluído" antigo enquanto um novo upload corre.
+  document.getElementById('uploadConcluido')?.classList.remove('open');
   prog.style.display = 'block';
   bar.style.width = '0%';
   stat.textContent = `Enviando ${files.length} arquivo(s) em ${batches.length} lote(s)...`;
@@ -1082,6 +1232,21 @@ async function loadArquivos() {
   S.arquivos = r.arquivos || [];
   renderFileList();
   _atualizarContadorSelecao();
+  _atualizarUploadConcluido();
+}
+
+function _atualizarUploadConcluido() {
+  const bloco = document.getElementById('uploadConcluido');
+  if (!bloco) return;
+  // Esconde durante envio (procAtivo) — durante upload o usuário já vê o
+  // banner azul fixo no topo, este verde é só para confirmar o "fim".
+  if (S.procAtivo || S.uploading) {
+    bloco.classList.remove('open');
+    return;
+  }
+  if (!S.arquivos.length) { bloco.classList.remove('open'); return; }
+  document.getElementById('uploadConcluidoN').textContent = S.arquivos.length;
+  bloco.classList.add('open');
 }
 
 function renderFileList() {
@@ -1101,20 +1266,24 @@ function renderFileList() {
   }
   list.innerHTML = S.arquivos.map(a => `
     <div class="file-item" style="opacity:${a.selecionado === false ? '.55' : '1'}">
-      <label style="display:flex;align-items:center;cursor:pointer;padding:0 4px 0 0">
+      <label style="display:flex;align-items:center;cursor:pointer;padding:0 4px 0 0"
+             title="${a.selecionado === false ? 'Desmarcado — não entra no processamento' : 'Marcado para entrar no processamento'}">
         <input type="checkbox"
                ${a.selecionado === false ? '' : 'checked'}
                onchange="toggleSelArquivo('${esc(a.filename)}', this.checked)">
       </label>
-      <span class="file-icon">📄</span>
+      <span class="file-icon" title="Arquivo enviado">📄</span>
       <div class="file-info">
         <div class="file-name">${a.filename}
-          <span class="file-preview-badge badge-cinza" id="prev-${esc(a.filename)}">—</span>
+          <span class="file-preview-badge badge-pendente" id="prev-${esc(a.filename)}"
+                title="Pré-visualização é opcional. Clique em ↻ Preview para conferir linhas e totais sem rodar o processamento.">preview ↻</span>
         </div>
-        <div class="file-meta">${fmtSize(a.size)}</div>
+        <div class="file-meta">${fmtSize(a.size)} · ✓ enviado</div>
       </div>
-      <button class="btn btn-ghost btn-sm" onclick="loadPreview('${esc(a.filename)}')">↻ Preview</button>
-      <button class="btn btn-danger btn-sm" onclick="removerArquivo('${esc(a.filename)}')">✕</button>
+      <button class="btn btn-ghost btn-sm" onclick="loadPreview('${esc(a.filename)}')"
+              title="Lê o arquivo e mostra contagem de linhas + totais (apenas conferência)">↻ Preview</button>
+      <button class="btn btn-danger btn-sm" onclick="removerArquivo('${esc(a.filename)}')"
+              title="Remove permanentemente do servidor. Para pular nesta rodada sem remover, desmarque o checkbox.">✕</button>
     </div>
   `).join('');
 }
@@ -1166,14 +1335,26 @@ function _atualizarContadorSelecao() {
 
 async function loadPreview(fn) {
   const badge = document.getElementById(`prev-${fn}`);
-  if (badge) { badge.textContent = '...'; badge.className = 'file-preview-badge badge-cinza'; }
+  if (badge) {
+    badge.textContent = 'lendo...';
+    badge.className = 'file-preview-badge badge-pendente';
+    badge.removeAttribute('title');
+  }
   const r = await api(`/api/preview/${encodeURIComponent(fn)}`);
   if (!r.ok) {
-    if (badge) { badge.textContent = 'erro'; badge.className = 'file-preview-badge badge-err'; }
+    if (badge) {
+      badge.textContent = 'preview indisponível';
+      badge.className = 'file-preview-badge badge-indisponivel';
+      badge.title = 'O arquivo foi enviado normalmente — apenas a pré-visualização rápida não conseguiu extrair linhas/totais (comum em PDFs sem tabelas detectáveis). Pode seguir para processamento.';
+    }
     return;
   }
   const e = `${r.rows} linhas | E: ${fmtMoeda(r.sum_entrada)} | S: ${fmtMoeda(r.sum_saida)}`;
-  if (badge) { badge.textContent = e; badge.className = 'file-preview-badge badge-ok'; }
+  if (badge) {
+    badge.textContent = e;
+    badge.className = 'file-preview-badge badge-ok';
+    badge.removeAttribute('title');
+  }
 }
 
 async function removerArquivo(fn) {
@@ -1198,7 +1379,6 @@ async function loadVerificacao() {
   const legadoBlock = document.getElementById('verifModoLegado');
   const selBar = document.getElementById('verifSelecaoBar');
   const selCount = document.getElementById('verifSelecaoCount');
-  const chkAll = document.getElementById('chkSelTodosVerif');
 
   legadoBlock.style.display = r.modo_legado ? 'block' : 'none';
 
@@ -1219,10 +1399,6 @@ async function loadVerificacao() {
   const selN = docs.filter(d => d.selecionado !== false).length;
   selBar.style.display = 'flex';
   selCount.textContent = `${selN}/${docs.length} marcado(s) para processar`;
-  if (chkAll) {
-    chkAll.checked = selN === docs.length;
-    chkAll.indeterminate = selN > 0 && selN < docs.length;
-  }
 
   lista.innerHTML = docs.map(doc => renderVerifCard(doc, r.modo_legado)).join('');
   _atualizarContadorSelecao();
@@ -1230,12 +1406,24 @@ async function loadVerificacao() {
 
 function bannerMsg(cruz, modoLegado) {
   const s = cruz.status;
-  if (modoLegado) return '⚙ Modo legado — atribuição pelo nome do arquivo, Rastreab=BAIXA';
-  if (s === 'concordam')        return '✓ Cabeçalho e nome do arquivo concordam';
-  if (s === 'apenas_cabecalho') return 'ℹ Identificado pelo cabeçalho (nome do arquivo sem sugestão)';
-  if (s === 'apenas_nome')      return '⚠ Apenas nome do arquivo sugere — cabeçalho não reconhecido. Confirme manualmente.';
-  if (s === 'conflito')         return `⚠ CONFLITO: cabeçalho → ${cruz.unit_id_cabecalho || '?'}, nome → ${cruz.unit_id_nome_arquivo || '?'}. Decida qual usar.`;
-  if (s === 'nenhum')           return '⚠ Nem cabeçalho nem nome identificam a conta. Cadastre a conta.';
+  if (modoLegado) {
+    return '📋 Modo Simplificado — sem contas cadastradas, identificação pelo nome do arquivo (rastreabilidade reduzida no Excel final)';
+  }
+  if (s === 'concordam') {
+    return '✓ Tudo certo — o cabeçalho do extrato e o nome do arquivo apontam para a mesma unidade';
+  }
+  if (s === 'apenas_cabecalho') {
+    return 'ℹ Identificado pelo cabeçalho do extrato (o nome do arquivo não trouxe sugestão — sem problema, o cabeçalho é a fonte confiável)';
+  }
+  if (s === 'apenas_nome') {
+    return '⚠ Cabeçalho do extrato não foi reconhecido. A sugestão veio só do nome do arquivo — clique abaixo para confirmar a conta.';
+  }
+  if (s === 'conflito') {
+    return `⚠ CONFLITO de identificação — cabeçalho do extrato aponta para "${cruz.unit_id_cabecalho || '?'}", nome do arquivo para "${cruz.unit_id_nome_arquivo || '?'}". Escolha qual usar (recomendado: cabeçalho).`;
+  }
+  if (s === 'nenhum') {
+    return '⚠ Nem o cabeçalho nem o nome do arquivo identificaram a conta. Cadastre a conta em ⚙ Configurações ou escolha uma existente abaixo.';
+  }
   return s;
 }
 

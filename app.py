@@ -47,7 +47,7 @@ DEPENDÊNCIAS
 ================================================================================
 """
 
-import os, json, re, difflib, hashlib, math
+import os, json, re, difflib, hashlib, math, atexit, time
 from pathlib import Path
 from flask import Flask, request, jsonify, render_template, send_file
 import pandas as pd
@@ -123,6 +123,69 @@ def upload_excedeu_limite(_e):
         ),
         'limite_mb': MAX_UPLOAD_MB,
     }), 413
+
+
+# ============================================================
+# CLEANUP DE UPLOADS — garantia de "sem resquícios"
+# ============================================================
+# Três escotilhas:
+#   1. /api/limpar (POST) — limpeza manual via botão "Reiniciar" do UI.
+#   2. atexit — limpa no shutdown gracioso do processo.
+#   3. _cleanup_uploads_velhos — varre na boot e remove arquivos com
+#      mtime > UPLOAD_TTL_HORAS. Defesa em profundidade para o caso de
+#      crash anterior ter deixado lixo (atexit não roda em SIGKILL).
+#
+# Não há cleanup imediato pós-export proposital: re-export do mesmo
+# Excel (após ajuste de Grupo B na UI) é UX comum e exige SESSION em
+# memória; arquivos em disco já não são re-lidos após processar(), só
+# ficam ocupando espaço.
+
+UPLOAD_TTL_HORAS = 24
+
+def _limpar_uploads_dir(*, preservar_gitkeep: bool = True) -> int:
+    """Apaga arquivos em UPLOAD_FOLDER. Retorna quantidade removida.
+
+    O `.gitkeep` é preservado por padrão para manter a pasta no
+    controle de versão.
+    """
+    n = 0
+    for f in UPLOAD_FOLDER.glob('*'):
+        if preservar_gitkeep and f.name == '.gitkeep':
+            continue
+        try:
+            f.unlink()
+            n += 1
+        except Exception:
+            pass
+    return n
+
+
+def _cleanup_uploads_velhos(ttl_horas: int = UPLOAD_TTL_HORAS) -> int:
+    """Remove arquivos em UPLOAD_FOLDER com mtime mais antigo que ttl_horas.
+
+    Chamado na boot. Não toca em .gitkeep nem em subpastas.
+    """
+    limite = time.time() - ttl_horas * 3600
+    n = 0
+    for f in UPLOAD_FOLDER.glob('*'):
+        if f.name == '.gitkeep' or not f.is_file():
+            continue
+        try:
+            if f.stat().st_mtime < limite:
+                f.unlink()
+                n += 1
+        except Exception:
+            pass
+    return n
+
+
+# Boot: limpa resquícios de sessões anteriores abandonadas
+_n_velhos = _cleanup_uploads_velhos()
+if _n_velhos:
+    print(f"[cleanup] removidos {_n_velhos} arquivos com mtime > {UPLOAD_TTL_HORAS}h")
+
+# Shutdown gracioso: limpa tudo (não dispara em SIGKILL — daí a TTL na boot)
+atexit.register(_limpar_uploads_dir)
 
 
 # ============================================================
@@ -2145,7 +2208,10 @@ def reset_depara():
 
 @app.route('/api/limpar', methods=['POST'])
 def limpar():
-    """Reinicia sessão e remove arquivos do disco. Preserva configurações."""
+    """Reinicia sessão e remove arquivos do disco. Preserva configurações.
+
+    Preserva `.gitkeep` em uploads/ para manter o controle de versão da pasta.
+    """
     global SESSION
     SESSION = {
         'arquivos': [], 'lancamentos': [], 'schema_map': {},
@@ -2155,10 +2221,8 @@ def limpar():
         'conta_por_arquivo': {}, 'conta_por_arquivo_meta': {},
         'arquivos_bloqueados': [], 'audit_log': [],
     }
-    for f in UPLOAD_FOLDER.glob('*'):
-        try: f.unlink()
-        except: pass
-    return jsonify({'ok': True})
+    removidos = _limpar_uploads_dir()
+    return jsonify({'ok': True, 'arquivos_removidos': removidos})
 
 
 # ============================================================

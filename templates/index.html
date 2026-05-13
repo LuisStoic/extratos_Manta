@@ -780,7 +780,54 @@ const S = {
   procTimerHandle: null,
   procUltimoProgresso: null,   // { pct, ts }
   maxUploadMb: 200,            // sobrescrito por /api/info
+  maxBatchMb:  25,             // tamanho-alvo de cada POST de upload
 };
+
+
+// ========== HELPERS — UPLOAD EM LOTES ==========
+function _chunkFiles(files, maxBytes) {
+  const batches = [];
+  let current = [];
+  let currentSize = 0;
+  for (const f of Array.from(files)) {
+    if (f.size > maxBytes) {
+      // Arquivo único maior que o lote — empurra como lote dele mesmo.
+      // O servidor pode rejeitar com 413, mas isso é problema separado.
+      if (current.length) { batches.push(current); current = []; currentSize = 0; }
+      batches.push([f]);
+      continue;
+    }
+    if (currentSize + f.size > maxBytes && current.length) {
+      batches.push(current); current = []; currentSize = 0;
+    }
+    current.push(f);
+    currentSize += f.size;
+  }
+  if (current.length) batches.push(current);
+  return batches;
+}
+
+function _enviarLote(files, onUploadProgress) {
+  return new Promise((resolve, reject) => {
+    const fd = new FormData();
+    for (const f of files) fd.append('files', f);
+    const xhr = new XMLHttpRequest();
+    xhr.upload.onprogress = (e) => {
+      if (e.lengthComputable && onUploadProgress) {
+        onUploadProgress(Math.round(e.loaded / e.total * 100));
+      }
+    };
+    xhr.onload = () => {
+      try {
+        const data = JSON.parse(xhr.responseText);
+        resolve({ status: xhr.status, data });
+      } catch { reject(new Error('Resposta inválida')); }
+    };
+    xhr.onerror = () => reject(new Error('Falha de rede'));
+    xhr.open('POST', '/api/upload');
+    xhr.send(fd);
+  });
+}
 
 // ========== INIT ==========
 document.addEventListener('DOMContentLoaded', async () => {
@@ -800,6 +847,9 @@ async function loadInfo() {
       S.maxUploadMb = r.max_upload_mb;
       const el = document.getElementById('uploadLimitTxt');
       if (el) el.textContent = `${r.max_upload_mb} MB`;
+    }
+    if (r && r.max_batch_mb) {
+      S.maxBatchMb = r.max_batch_mb;
     }
   } catch (e) { /* mantém defaults */ }
 }
@@ -917,10 +967,8 @@ function setupUpload() {
 }
 
 async function handleUpload() {
-  const files = document.getElementById('fileInput').files;
+  const files = [...document.getElementById('fileInput').files];
   if (!files.length) return;
-  const fd = new FormData();
-  for (const f of files) fd.append('files', f);
 
   const prog = document.getElementById('uploadProgress');
   const bar  = document.getElementById('uploadBar');
@@ -928,78 +976,78 @@ async function handleUpload() {
   const btn  = document.getElementById('btnAvancar1');
   const zone = document.getElementById('uploadZone');
 
+  const maxBytes = (S.maxBatchMb || 25) * 1024 * 1024;
+  const batches  = _chunkFiles(files, maxBytes);
+
   S.uploading = true;
   prog.style.display = 'block';
   bar.style.width = '0%';
-  stat.textContent = `Enviando ${files.length} arquivo(s)...`;
+  stat.textContent = `Enviando ${files.length} arquivo(s) em ${batches.length} lote(s)...`;
   btn.disabled = true;
   btn.style.opacity = '.4';
   zone.style.pointerEvents = 'none';
   showAlert('alert1', '', '');
-  startProcessandoBanner(`Enviando ${files.length} arquivo(s) — não feche esta janela`);
+  startProcessandoBanner(`Enviando ${files.length} arquivo(s) em ${batches.length} lote(s) — não feche esta janela`);
 
-  try {
-    const xhr = new XMLHttpRequest();
-    const result = await new Promise((resolve, reject) => {
-      xhr.upload.onprogress = (e) => {
-        if (e.lengthComputable) {
-          const pct = Math.round(e.loaded / e.total * 100);
-          bar.style.width = pct + '%';
-          stat.textContent = `Enviando... ${pct}%`;
-        }
-      };
-      xhr.onload = () => {
-        try { resolve(JSON.parse(xhr.responseText)); }
-        catch { reject(new Error('Resposta inválida')); }
-      };
-      xhr.onerror = () => reject(new Error('Falha de rede'));
-      xhr.open('POST', '/api/upload');
-      xhr.send(fd);
-    });
+  const tally = { uploaded: [], dupl: [], erros: [], limite: false };
 
-    bar.style.width = '100%';
-    stat.textContent = 'Processando resposta...';
+  for (let i = 0; i < batches.length; i++) {
+    const lote = batches[i];
+    const rotulo = `Lote ${i+1}/${batches.length} (${lote.length} arquivo${lote.length>1?'s':''})`;
+    stat.textContent = `${rotulo} — preparando...`;
 
-    const r = result;
-    if (!r.ok && r.erro === 'upload_excedeu_limite') {
-      stat.textContent = `✗ Limite de ${r.limite_mb || S.maxUploadMb} MB excedido`;
-      stat.style.color = 'red';
-      showAlert('alert1',
-        r.mensagem || `O envio excedeu ${r.limite_mb || S.maxUploadMb} MB. Divida em lotes menores.`,
-        'error');
-    } else {
-      const dupl  = (r.rejected||[]).filter(x => x.motivo.includes('idêntico') || x.motivo.includes('mesmo nome'));
-      const erros = (r.rejected||[]).filter(x => !x.motivo.includes('idêntico') && !x.motivo.includes('mesmo nome'));
+    try {
+      const { status, data } = await _enviarLote(lote, (pct) => {
+        const overall = Math.round(((i + pct/100) / batches.length) * 100);
+        bar.style.width = overall + '%';
+        stat.textContent = `${rotulo} — ${pct}%`;
+      });
 
-      if (r.uploaded && r.uploaded.length) {
-        stat.textContent = `✓ ${r.uploaded.length} arquivo(s) adicionado(s) com sucesso`;
-        stat.style.color = 'var(--green)';
-        showAlert('alert1', `${r.uploaded.length} arquivo(s) adicionado(s).`, 'success');
-      }
-      if (dupl.length) {
+      if (status === 413 || (data && data.erro === 'upload_excedeu_limite')) {
+        tally.limite = true;
         showAlert('alert1',
-          `${dupl.length} duplicata(s) ignorada(s): ${dupl.map(x=>`"${x.filename}" — ${x.motivo}`).join(' | ')}`,
-          'warn');
-      }
-      if (erros.length) {
-        showAlert('alert1',
-          erros.map(x=>`${x.filename}: ${x.motivo}`).join(' | '),
+          `${rotulo} excedeu o limite por requisição (${data?.limite_mb || S.maxUploadMb} MB). `
+          + 'Configure MAX_BATCH_MB menor ou reduza arquivos.',
           'error');
+        continue; // tenta os demais lotes mesmo assim
       }
-      if (!r.uploaded?.length && !dupl.length && !erros.length) {
-        stat.textContent = 'Nenhum arquivo processado';
-        stat.style.color = 'var(--amber)';
-        showAlert('alert1', 'Nenhum arquivo processado.', 'warn');
+
+      if (data && data.uploaded)  tally.uploaded.push(...data.uploaded);
+      const rejected = (data && data.rejected) || [];
+      for (const r of rejected) {
+        const isDupl = r.motivo.includes('idêntico') || r.motivo.includes('mesmo nome');
+        (isDupl ? tally.dupl : tally.erros).push(r);
       }
+    } catch (err) {
+      tally.erros.push({ filename: `(lote ${i+1})`, motivo: `Falha de rede: ${err.message}` });
     }
-  } catch (err) {
-    stat.textContent = '✗ Erro no envio';
-    stat.style.color = 'red';
-    showAlert('alert1', `Erro: ${err.message}`, 'error');
-  } finally {
-    stopProcessandoBanner();
   }
 
+  // Tally final ---------------------------------------------------------
+  bar.style.width = '100%';
+  const total = tally.uploaded.length;
+  if (total) {
+    stat.textContent = `✓ ${total} arquivo(s) adicionado(s) em ${batches.length} lote(s)`;
+    stat.style.color = 'var(--green)';
+    showAlert('alert1', `${total} arquivo(s) adicionado(s).`, 'success');
+  }
+  if (tally.dupl.length) {
+    showAlert('alert1',
+      `${tally.dupl.length} duplicata(s) ignorada(s): ${tally.dupl.map(x=>`"${x.filename}" — ${x.motivo}`).join(' | ')}`,
+      'warn');
+  }
+  if (tally.erros.length) {
+    showAlert('alert1',
+      tally.erros.map(x=>`${x.filename}: ${x.motivo}`).join(' | '),
+      'error');
+  }
+  if (!total && !tally.dupl.length && !tally.erros.length && !tally.limite) {
+    stat.textContent = 'Nenhum arquivo processado';
+    stat.style.color = 'var(--amber)';
+    showAlert('alert1', 'Nenhum arquivo processado.', 'warn');
+  }
+
+  stopProcessandoBanner();
   S.uploading = false;
   btn.disabled = false;
   btn.style.opacity = '1';
@@ -1258,7 +1306,38 @@ async function processar() {
 
   let r;
   try {
-    r = await api('/api/processar', 'POST', body);
+    // Bypass do helper api() para conseguir distinguir 409 vs falha de rede.
+    let resp;
+    try {
+      resp = await fetch('/api/processar', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+      });
+    } catch (netErr) {
+      // Conexão caiu (provavelmente timeout do proxy do PaaS).
+      // O worker provavelmente continua até gravar resultado em SESSION.
+      showAlert('alert3',
+        'Conexão interrompida durante o processamento. Aguardando servidor concluir...',
+        'warn');
+      r = await _aguardarResultado();
+      throw new Error('__recovered__'); // pula direto para o finally
+    }
+
+    if (resp.status === 409) {
+      // Já há processamento ativo na sessão (outra aba ou clique duplo).
+      const data = await resp.json();
+      showAlert('alert3',
+        data.msg || 'Já há processamento em andamento. Aguardando concluir...',
+        'warn');
+      r = await _aguardarResultado();
+    } else {
+      r = await resp.json();
+    }
+  } catch (e) {
+    if (e && e.message !== '__recovered__') {
+      r = r || { ok: false, msg: String(e) };
+    }
   } finally {
     clearInterval(pollInterval);
     stopProcessandoBanner();
@@ -1298,6 +1377,34 @@ async function pollProgresso() {
   document.getElementById('progressBar').style.width = `${r.pct}%`;
   document.getElementById('progressLabel').textContent = r.msg;
   _notarStaleProgresso(r.pct);
+}
+
+
+/**
+ * Polling de /api/progresso até concluído, depois retorna /api/resultado.
+ *
+ * Usado pelo recovery quando o POST /api/processar perdeu a conexão
+ * (timeout de proxy do PaaS) mas o worker continua processando até
+ * gravar o resultado em SESSION.
+ *
+ * Timeout duro de 30 min para não ficar polling indefinido.
+ */
+async function _aguardarResultado() {
+  const deadline = Date.now() + 30 * 60 * 1000;
+  while (Date.now() < deadline) {
+    await new Promise(res => setTimeout(res, 2000));
+    let p;
+    try { p = await api('/api/progresso'); } catch (_) { continue; }
+    if (p && typeof p.pct === 'number') {
+      _notarStaleProgresso(p.pct);
+      document.getElementById('progressBar').style.width = `${p.pct}%`;
+      document.getElementById('progressLabel').textContent = p.msg || '';
+      if (p.pct >= 100 && !p.ativo) {
+        return await api('/api/resultado');
+      }
+    }
+  }
+  return { ok: false, msg: 'Timeout esperando conclusão do servidor (30 min).' };
 }
 
 // ========== TAB 4: REVISÃO ==========

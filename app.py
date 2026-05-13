@@ -66,6 +66,12 @@ from resolucao_conta  import resolver_conta, validar_cruzado
 
 app = Flask(__name__)
 MAX_UPLOAD_MB = 200
+# Tamanho-alvo de cada POST de upload feito pelo frontend. O servidor
+# aceita até MAX_UPLOAD_MB, mas o proxy do PaaS pode capar o body em
+# valor menor (Render Free é descrito em alguns relatos como ~30 MB).
+# O frontend usa MAX_BATCH_MB para particionar uploads grandes em
+# múltiplos POSTs sequenciais.
+MAX_BATCH_MB  = 25
 app.config['MAX_CONTENT_LENGTH'] = MAX_UPLOAD_MB * 1024 * 1024
 UPLOAD_FOLDER = Path(__file__).parent / 'uploads'
 UPLOAD_FOLDER.mkdir(exist_ok=True)
@@ -378,6 +384,22 @@ _SESSIONS_STORE: dict = {}        # session_id (cookie) -> dict de sessão
 _DEFAULT_SESSION: dict = _nova_sessao()
 SESSION_COOKIE = 'app_session'
 SESSION_COOKIE_MAX_AGE = 30 * 86400   # 30 dias
+SESSIONS_STORE_TTL_SECS = 7 * 86400   # 7 dias sem acesso → coleta
+
+
+def _cleanup_sessoes_velhas() -> int:
+    """Remove sessões de `_SESSIONS_STORE` inativas há mais de SESSIONS_STORE_TTL_SECS.
+
+    Evita memory leak quando muitos cookies diferentes são gerados ao longo
+    do tempo (ex.: muitos browsers/IPs distintos visitando o mesmo deploy).
+    Chamado lazy via `/api/info` (request mais comum no ciclo de vida do UI).
+    """
+    cutoff = time.time() - SESSIONS_STORE_TTL_SECS
+    expirados = [sid for sid, s in _SESSIONS_STORE.items()
+                 if s.get('_last_access', 0) < cutoff]
+    for sid in expirados:
+        del _SESSIONS_STORE[sid]
+    return len(expirados)
 
 
 def _resolve_session() -> dict:
@@ -385,7 +407,8 @@ def _resolve_session() -> dict:
 
     Fora de request context, ou em modo TESTING, retorna `_DEFAULT_SESSION`
     (compartilhado). Dentro de request real, retorna o dict ligado ao cookie
-    `app_session` do browser, criando um novo se necessário.
+    `app_session` do browser, criando um novo se necessário. Atualiza
+    `_last_access` para alimentar a coleta de TTL.
     """
     if not has_request_context():
         return _DEFAULT_SESSION
@@ -399,9 +422,11 @@ def _resolve_session() -> dict:
         sid = uuid.uuid4().hex
         _SESSIONS_STORE[sid] = _nova_sessao()
         g._needs_cookie = sid
-    g._app_session    = _SESSIONS_STORE[sid]
+    sess = _SESSIONS_STORE[sid]
+    sess['_last_access'] = time.time()
+    g._app_session    = sess
     g._app_session_id = sid
-    return _SESSIONS_STORE[sid]
+    return sess
 
 
 SESSION = LocalProxy(_resolve_session)
@@ -1315,6 +1340,11 @@ def _resolver_atribuicao(fn: str, cruzamento: dict, uid_nome: str | None,
 # ROTAS — PROCESSAMENTO PRINCIPAL
 # ============================================================
 
+# Limite de tempo para considerar um /api/processar "stale" (abandonado/crashed).
+# Após esse limite o guard 409 libera nova requisição mesmo com ativo=True.
+PROCESSAR_STALE_SECS = 30 * 60   # 30 minutos
+
+
 @app.route('/api/processar', methods=['POST'])
 def processar():
     """
@@ -1324,11 +1354,30 @@ def processar():
     Passo 2 — Linha a linha: extrai campos, aplica fallbacks B1/B2/B3, classifica.
 
     Progresso disponível via GET /api/progresso (polling).
+    Snapshot do resultado (mesmo após perda de conexão HTTP do POST original)
+    disponível via GET /api/resultado.
     """
     if not SESSION['arquivos']:
         return jsonify({'ok': False, 'msg': 'Nenhum arquivo carregado'}), 400
 
-    SESSION['progresso'] = {'pct': 2, 'msg': 'Detectando schema...', 'ativo': True}
+    # Guard contra processar concorrente na mesma sessão. Stale após
+    # PROCESSAR_STALE_SECS — protege contra worker SIGKILL que deixou
+    # 'ativo=True' órfão na SESSION.
+    if SESSION['progresso'].get('ativo'):
+        started = SESSION['progresso'].get('started_at', 0)
+        if time.time() - started < PROCESSAR_STALE_SECS:
+            return jsonify({
+                'ok': False,
+                'erro': 'processar_em_andamento',
+                'msg': 'Já há processamento em andamento nesta sessão. '
+                       'Aguarde concluir ou consulte /api/resultado.',
+                'progresso': SESSION['progresso'],
+            }), 409
+
+    SESSION['progresso'] = {
+        'pct': 2, 'msg': 'Detectando schema...', 'ativo': True,
+        'started_at': time.time(),
+    }
 
     # Passo 1: schema global (usa o arquivo com mais anchors obrigatórios como referência)
     all_file_schemas = {}
@@ -1540,14 +1589,45 @@ def processar():
 def progresso():
     return jsonify(SESSION['progresso'])
 
+
+@app.route('/api/resultado')
+def resultado():
+    """Snapshot do estado pós-processamento, lido de SESSION.
+
+    Existe para client-side recovery: quando o POST /api/processar perde
+    a conexão (timeout do proxy do PaaS), o worker continua até concluir
+    e grava em SESSION. O frontend então pega tudo aqui.
+    """
+    todos     = SESSION['lancamentos']
+    prog      = SESSION['progresso']
+    concluido = (prog.get('pct', 0) >= 100) and (not prog.get('ativo', False))
+    return jsonify({
+        'ok':         True,
+        'concluido':  concluido,
+        'ativo':      bool(prog.get('ativo', False)),
+        'progresso':  prog,
+        'total':      len(todos),
+        'grupo_a':    sum(1 for l in todos if l.get('grupo') == 'A'),
+        'grupo_b':    sum(1 for l in todos if l.get('grupo') == 'B'),
+        'schema_map': {k: v for k, v in SESSION['schema_map'].items() if v},
+        'bloqueados': SESSION.get('arquivos_bloqueados', []),
+        'processado': SESSION.get('processado', False),
+    })
+
+
 @app.route('/api/info')
 def info():
     """Metadados de runtime que o frontend lê na boot.
 
-    Permite o UI exibir limites/capacidades reais em vez de hardcoded.
+    Permite o UI exibir limites/capacidades reais em vez de hardcoded,
+    e particionar uploads de acordo com `max_batch_mb`. Também aciona a
+    coleta lazy de sessões antigas em `_SESSIONS_STORE` (cheap: roda só
+    quando uma página é aberta).
     """
+    _cleanup_sessoes_velhas()
     return jsonify({
         'max_upload_mb':     MAX_UPLOAD_MB,
+        'max_batch_mb':      MAX_BATCH_MB,
         'upload_ttl_horas':  UPLOAD_TTL_HORAS,
         'has_pdf_extractor': HAS_PDF_EXTRACTOR,
         'extensoes':         sorted(ALLOWED_EXT),

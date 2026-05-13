@@ -1482,6 +1482,19 @@ def processar():
 def progresso():
     return jsonify(SESSION['progresso'])
 
+@app.route('/api/info')
+def info():
+    """Metadados de runtime que o frontend lê na boot.
+
+    Permite o UI exibir limites/capacidades reais em vez de hardcoded.
+    """
+    return jsonify({
+        'max_upload_mb':     MAX_UPLOAD_MB,
+        'upload_ttl_horas':  UPLOAD_TTL_HORAS,
+        'has_pdf_extractor': HAS_PDF_EXTRACTOR,
+        'extensoes':         sorted(ALLOWED_EXT),
+    })
+
 
 # ============================================================
 # ROTAS — LANÇAMENTOS (paginado)

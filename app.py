@@ -64,7 +64,8 @@ from resolucao_conta  import resolver_conta, validar_cruzado
 # ============================================================
 
 app = Flask(__name__)
-app.config['MAX_CONTENT_LENGTH'] = 100 * 1024 * 1024  # limite de upload: 100 MB
+MAX_UPLOAD_MB = 200
+app.config['MAX_CONTENT_LENGTH'] = MAX_UPLOAD_MB * 1024 * 1024
 UPLOAD_FOLDER = Path(__file__).parent / 'uploads'
 UPLOAD_FOLDER.mkdir(exist_ok=True)
 app.config['UPLOAD_FOLDER'] = UPLOAD_FOLDER
@@ -108,6 +109,20 @@ def jsonify(*args, **kwargs):
         mimetype='application/json'
     )
     return resp
+
+
+@app.errorhandler(413)
+def upload_excedeu_limite(_e):
+    """Resposta amigável quando o request total ultrapassa MAX_CONTENT_LENGTH."""
+    return jsonify({
+        'ok': False,
+        'erro': 'upload_excedeu_limite',
+        'mensagem': (
+            f'O envio total excedeu o limite de {MAX_UPLOAD_MB} MB por requisição. '
+            f'Divida os arquivos em lotes menores e envie em rodadas separadas.'
+        ),
+        'limite_mb': MAX_UPLOAD_MB,
+    }), 413
 
 
 # ============================================================

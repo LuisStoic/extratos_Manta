@@ -1,3 +1,9 @@
 pytest>=7.0
 pytest-cov>=4.0
 openpyxl>=3.1
+
+# Documentação (Sphinx) — build local: cd docs && make html
+sphinx>=7.2
+furo>=2024.5
+myst-parser>=2.0
+sphinx-autodoc-typehints>=2.0

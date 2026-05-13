@@ -10,3 +10,6 @@ uploads/
 
 # Artefatos zipados de releases anteriores — versionados via GitHub Releases
 app_extratos_v*.zip
+
+# Sphinx build output
+docs/_build/
